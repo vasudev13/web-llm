@@ -23,7 +23,15 @@ interface ModelSpec {
   sizeClass: string;
 }
 
-const MODELS: ModelSpec[] = [
+// Smoke mode: append `?smoke` to the URL (e.g. http://localhost:8888/?smoke)
+// to run a fast subset -- one small model and two small context windows --
+// for a quick "does this work?" check (~1 min) instead of the full sweep
+// (both models, up to 32K, many minutes). No code editing required.
+const SMOKE =
+  typeof location !== "undefined" &&
+  new URLSearchParams(location.search).has("smoke");
+
+const ALL_MODELS: ModelSpec[] = [
   {
     label: "Llama-3.2-3B (q4f16)",
     modelId: "Llama-3.2-3B-Instruct-q4f16_1-MLC",
@@ -36,9 +44,13 @@ const MODELS: ModelSpec[] = [
   },
 ];
 
+// Full sweep uses both models; smoke mode uses just the 3B.
+const MODELS: ModelSpec[] = SMOKE ? [ALL_MODELS[0]] : ALL_MODELS;
+
 // Context windows to sweep. Note: large windows (16k/32k) require a very large
 // prefill and can take minutes per run -- trim this list while iterating.
-const CONTEXT_SIZES = [2048, 4096, 8192, 16384, 32768];
+// Smoke mode uses just two small windows for speed.
+const CONTEXT_SIZES = SMOKE ? [2048, 4096] : [2048, 4096, 8192, 16384, 32768];
 
 // Fraction of the window filled by the prompt; the remainder is generated so
 // decode reaches the cap quickly while still stressing KV memory.
@@ -322,6 +334,11 @@ function summarizeCliff(rows: RunResult[]) {
 // Main
 // ---------------------------------------------------------------------------
 async function main() {
+  setStatus(
+    `${SMOKE ? "SMOKE" : "FULL"} sweep: ${MODELS.length} model(s) x ` +
+      `${CONTEXT_SIZES.length} context size(s)` +
+      `${SMOKE ? " (append/remove ?smoke in the URL to switch)" : ""}`,
+  );
   const results: RunResult[] = [];
   for (const spec of MODELS) {
     for (const ctx of CONTEXT_SIZES) {

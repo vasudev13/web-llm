@@ -34,16 +34,33 @@ Open the page in Chrome and **open the console**. You'll see:
 - A live HTML results table, and on completion a `console.table`, an **OOM cliff
   summary**, and **CSV** + **JSON** dumps you can paste into the template below.
 
+### Smoke mode (fast check, no code editing)
+
+For a quick "does this work?" run (~1 min) instead of the full sweep, append
+`?smoke` to the URL:
+
+- `http://localhost:8888` → **full sweep**: both models, all 5 context sizes up
+  to 32K (many minutes).
+- `http://localhost:8888/?smoke` → **smoke mode**: just the 3B model and
+  `[2048, 4096]`.
+
+The active mode is printed to the console and the status line at startup.
+
+### Other config
+
 Edit the config block at the top of `src/context_window_oom_bench.ts`:
 
-- `MODELS` — defaults to `Llama-3.2-3B-Instruct-q4f16_1-MLC` (3B) and
-  `Qwen2.5-7B-Instruct-q4f16_1-MLC` (7B).
-- `CONTEXT_SIZES` — defaults to `[2048, 4096, 8192, 16384, 32768]`.
+- `ALL_MODELS` — defaults to `Llama-3.2-3B-Instruct-q4f16_1-MLC` (3B) and
+  `Qwen2.5-7B-Instruct-q4f16_1-MLC` (7B). The full sweep uses both; smoke mode
+  uses just the first.
+- `CONTEXT_SIZES` — full sweep is `[2048, 4096, 8192, 16384, 32768]`; smoke mode
+  is `[2048, 4096]`.
 - `PROMPT_FILL_FRACTION` — how much of the window the prompt fills before decode
   reaches the cap (default `0.85`).
 
 > **Runtime warning:** large windows (16K/32K) require a very large prefill and
-> can take **minutes** per run. Trim `CONTEXT_SIZES` while iterating.
+> can take **minutes** per run. Trim `CONTEXT_SIZES` (or use `?smoke`) while
+> iterating.
 
 ## What each run records
 
