@@ -13,7 +13,7 @@ async function main() {
     setLabel("init-label", report.text);
   };
   // Option 1: If we do not specify appConfig, we use `prebuiltAppConfig` defined in `config.ts`
-  const selectedModel = "Llama-3.1-8B-Instruct-q4f32_1-MLC";
+  const selectedModel = "Qwen2.5-3B-Instruct-q4f16_1-MLC";
   const engine: webllm.MLCEngineInterface = await webllm.CreateMLCEngine(
     selectedModel,
     {
