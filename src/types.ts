@@ -1,4 +1,5 @@
 import { AppConfig, ChatOptions } from "./config";
+import type { KVCacheMetrics } from "./llm_chat";
 import {
   ChatCompletionRequest,
   ChatCompletionRequestBase,
@@ -178,6 +179,18 @@ export interface MLCEngineInterface {
    * @note This is an async function
    */
   runtimeStatsText: (modelId?: string) => Promise<string>;
+
+  /**
+   * Measurement-only snapshot of the PagedKVCache allocation for a loaded
+   * model: page/buffer geometry and an estimated peak-VRAM breakdown. Useful
+   * for reproducing the context-window cap and estimating the OOM cliff
+   * (Linear VAS-49). Estimates only -- WebGPU exposes no GPU-memory query.
+   *
+   * @param modelId Only required when multiple models are loaded.
+   * @returns The metrics, or `undefined` if no KVCache was allocated.
+   * @note This is an async function. Not implemented for embedding models.
+   */
+  getKVCacheMetrics: (modelId?: string) => Promise<KVCacheMetrics | undefined>;
 
   /**
    * Interrupt the generate process if it is already running.

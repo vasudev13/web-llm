@@ -13,7 +13,7 @@ import {
   DefaultLogLevel,
   ModelType,
 } from "./config";
-import { LLMChatPipeline } from "./llm_chat";
+import { LLMChatPipeline, KVCacheMetrics } from "./llm_chat";
 import {
   // ChatCompletion
   ChatCompletionRequest,
@@ -1315,6 +1315,16 @@ export class MLCEngine implements MLCEngineInterface {
     );
     const [, selectedPipeline] = this.getLLMStates("runtimeStatsText", modelId);
     return selectedPipeline.runtimeStatsText();
+  }
+
+  async getKVCacheMetrics(
+    modelId?: string,
+  ): Promise<KVCacheMetrics | undefined> {
+    const [, selectedPipeline] = this.getLLMStates(
+      "getKVCacheMetrics",
+      modelId,
+    );
+    return selectedPipeline.getKVCacheMetrics();
   }
 
   async resetChat(keepStats = false, modelId?: string) {

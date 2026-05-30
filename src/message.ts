@@ -18,6 +18,7 @@ import {
 type RequestKind =
   | "reload"
   | "runtimeStatsText"
+  | "getKVCacheMetrics"
   | "interruptGenerate"
   | "unload"
   | "resetChat"

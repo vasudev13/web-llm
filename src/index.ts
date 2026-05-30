@@ -31,6 +31,8 @@ export {
 
 export { MLCEngine, CreateMLCEngine } from "./engine";
 
+export type { KVCacheMetrics } from "./llm_chat";
+
 export {
   hasModelInCache,
   deleteChatConfigInCache,

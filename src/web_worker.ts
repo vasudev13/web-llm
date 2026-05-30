@@ -6,6 +6,7 @@ import {
   LogLevel,
   LogitProcessor,
 } from "./types";
+import type { KVCacheMetrics } from "./llm_chat";
 import {
   ChatCompletionRequest,
   ChatCompletionRequestBase,
@@ -266,6 +267,15 @@ export class WebWorkerMLCEngineHandler {
         this.handleTask(msg.uuid, async () => {
           const params = msg.content as RuntimeStatsTextParams;
           const res = await this.engine.runtimeStatsText(params.modelId);
+          onComplete?.(res);
+          return res;
+        });
+        return;
+      }
+      case "getKVCacheMetrics": {
+        this.handleTask(msg.uuid, async () => {
+          const params = msg.content as RuntimeStatsTextParams;
+          const res = await this.engine.getKVCacheMetrics(params.modelId);
           onComplete?.(res);
           return res;
         });
@@ -582,6 +592,19 @@ export class WebWorkerMLCEngine implements MLCEngineInterface {
       },
     };
     return await this.getPromise<string>(msg);
+  }
+
+  async getKVCacheMetrics(
+    modelId?: string,
+  ): Promise<KVCacheMetrics | undefined> {
+    const msg: WorkerRequest = {
+      kind: "getKVCacheMetrics",
+      uuid: crypto.randomUUID(),
+      content: {
+        modelId: modelId,
+      },
+    };
+    return await this.getPromise<KVCacheMetrics | undefined>(msg);
   }
 
   interruptGenerate(): void {

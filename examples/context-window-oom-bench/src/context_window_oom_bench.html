@@ -1,0 +1,20 @@
+<!doctype html>
+<html>
+  <script>
+    webLLMGlobal = {};
+  </script>
+  <body>
+    <h2>WebLLM &mdash; Context-Window / OOM-Cliff Benchmark (VAS-49)</h2>
+    Open the browser console to see live progress, the PagedKVCache
+    instrumentation logs, and the final CSV / JSON dumps.
+    <br />
+    <br />
+    <label id="init-label"> </label>
+    <h3>Status</h3>
+    <label id="status-label"> </label>
+    <h3>Results</h3>
+    <div id="results-table"></div>
+
+    <script type="module" src="./context_window_oom_bench.ts"></script>
+  </body>
+</html>

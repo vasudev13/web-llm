@@ -57,6 +57,48 @@ type ResolvedModelABI = {
   needsRNNState: boolean;
 };
 
+/**
+ * Measurement-only snapshot of the PagedKVCache allocation for a loaded model.
+ *
+ * Used to reproduce the context-window cap and to estimate the OOM cliff
+ * (see Linear VAS-49). All byte fields are best-effort estimates derived from
+ * the model's compiled metadata using the same formula as
+ * `utils/vram_requirements`; they do NOT query actual GPU memory (WebGPU
+ * exposes no such API). Reading these values has no effect on inference.
+ */
+export interface KVCacheMetrics {
+  /** Configured context window (tokens); -1 if sliding window is used instead. */
+  contextWindowSize: number;
+  /** Configured sliding window (tokens); -1 if a fixed context window is used. */
+  slidingWindowSize: number;
+  /** Tokens the KVCache is actually allocated for (= sliding or context window). */
+  maxTotalSeqLen: number;
+  /** Page size (tokens per page) used by the paged KVCache. */
+  pageSize: number;
+  /** Number of pages reserved = ceil(maxTotalSeqLen / pageSize). */
+  numPages: number;
+  /** Max concurrent sequences the cache is sized for. */
+  maxNumSequence: number;
+  /** Prefill chunk size from compiled metadata. */
+  prefillChunkSize: number;
+  /** Estimated bytes for model parameters. */
+  paramBytes: number;
+  /** Estimated peak temporary/intermediate buffer bytes across compiled funcs. */
+  maxTempFuncBytes: number;
+  /** Estimated per-token KVCache bytes (0 if it could not be derived). */
+  kvBytesPerToken: number;
+  /** Estimated KVCache bytes for maxTotalSeqLen. */
+  kvCacheBytes: number;
+  /** Estimated peak VRAM = paramBytes + maxTempFuncBytes + kvCacheBytes. */
+  estimatedTotalVRAMBytes: number;
+  /**
+   * Whether kvCacheBytes was scaled to the configured context window. False
+   * means we fell back to the compile-time `metadata.kv_cache_bytes` because a
+   * compiled context length was not available to derive a per-token cost.
+   */
+  scaledToConfiguredContext: boolean;
+}
+
 export class LLMChatPipeline {
   private config: ChatConfig;
   private tokenizer: Tokenizer;
@@ -95,6 +137,8 @@ export class LLMChatPipeline {
   private maxHistorySize = 1;
   private logitsOnCPU?: tvmjs.Tensor = undefined;
   private filledKVCacheLength = 0;
+  // Measurement-only snapshot of the PagedKVCache allocation; see VAS-49.
+  private kvCacheMetrics: KVCacheMetrics | undefined = undefined;
 
   // meta data
   private bosTokenId = 1;
@@ -439,6 +483,86 @@ export class LLMChatPipeline {
       );
     }
 
+    // VAS-49 instrumentation: snapshot the PagedKVCache allocation so callers
+    // can reproduce the context cap and estimate the OOM cliff. These are
+    // estimates only -- WebGPU exposes no GPU-memory query -- and mirror the
+    // formula in `utils/vram_requirements`. No effect on inference.
+    if (this.resolvedModelABI.needsKVCache) {
+      const dtypeBytesMap: { [dtype: string]: number } = {
+        uint32: 4,
+        uint16: 2,
+        float32: 4,
+        float16: 4,
+      };
+      let paramBytes = 0;
+      try {
+        (metadata.params ?? []).forEach((param: any) => {
+          const shape: number[] = param.shape ?? [];
+          if (shape.length > 0 && Math.min(...shape) > 0) {
+            const dtypeBytes = dtypeBytesMap[param.dtype] ?? 0;
+            paramBytes +=
+              shape.reduce((a: number, b: number) => a * b, 1) * dtypeBytes;
+          }
+        });
+      } catch (e) {
+        log.warn("KVCache instrumentation: could not estimate paramBytes.", e);
+      }
+      let maxTempFuncBytes = 0;
+      const memUsage = metadata.memory_usage ?? {};
+      Object.values(memUsage).forEach((bytes: any) => {
+        if (typeof bytes === "number") {
+          maxTempFuncBytes = Math.max(maxTempFuncBytes, bytes);
+        }
+      });
+      const compiledKvCacheBytes =
+        typeof metadata.kv_cache_bytes === "number"
+          ? metadata.kv_cache_bytes
+          : 0;
+      const compiledContextLen =
+        metadata.context_window_size > 0
+          ? metadata.context_window_size
+          : metadata.max_window_size > 0
+            ? metadata.max_window_size
+            : -1;
+      const kvBytesPerToken =
+        compiledContextLen > 0 ? compiledKvCacheBytes / compiledContextLen : 0;
+      const scaledToConfiguredContext = kvBytesPerToken > 0;
+      const kvCacheBytes = scaledToConfiguredContext
+        ? Math.round(kvBytesPerToken * maxTotalSeqLen)
+        : compiledKvCacheBytes;
+      const pageSize = defaultPageSize;
+      const numPages = Math.ceil(maxTotalSeqLen / pageSize);
+      this.kvCacheMetrics = {
+        contextWindowSize: this.contextWindowSize,
+        slidingWindowSize: this.slidingWindowSize,
+        maxTotalSeqLen,
+        pageSize,
+        numPages,
+        maxNumSequence: defaultMaxNumSequence,
+        prefillChunkSize: this.prefillChunkSize,
+        paramBytes,
+        maxTempFuncBytes,
+        kvBytesPerToken,
+        kvCacheBytes,
+        estimatedTotalVRAMBytes: paramBytes + maxTempFuncBytes + kvCacheBytes,
+        scaledToConfiguredContext,
+      };
+      const toMB = (b: number) => (b / 1024 / 1024).toFixed(2);
+      log.info(
+        `PagedKVCache allocation: maxTotalSeqLen=${maxTotalSeqLen}, ` +
+          `pages=${numPages} x pageSize=${pageSize}, ` +
+          `maxNumSequence=${defaultMaxNumSequence}, ` +
+          `prefillChunkSize=${this.prefillChunkSize}`,
+      );
+      log.info(
+        `PagedKVCache memory estimate: params=${toMB(paramBytes)}MB, ` +
+          `tempBuffers=${toMB(maxTempFuncBytes)}MB, ` +
+          `kvCache=${toMB(kvCacheBytes)}MB` +
+          `${scaledToConfiguredContext ? "" : " (compile-time, unscaled)"}, ` +
+          `estPeakVRAM=${toMB(this.kvCacheMetrics.estimatedTotalVRAMBytes)}MB`,
+      );
+    }
+
     if (this.resolvedModelABI.needsRNNState) {
       const createRNNState = LLMChatPipeline.getRequiredVMFunctionByName(
         "create_rnn_state",
@@ -628,6 +752,15 @@ export class LLMChatPipeline {
    */
   getCurRoundLatencyBreakdown(): LatencyBreakdown {
     return this.curRoundLatencyBreakdown;
+  }
+
+  /**
+   * @returns Measurement-only snapshot of the PagedKVCache allocation for the
+   * currently loaded model (see {@link KVCacheMetrics} / Linear VAS-49), or
+   * `undefined` if no KVCache was allocated (e.g. RNN-state-only models).
+   */
+  getKVCacheMetrics(): KVCacheMetrics | undefined {
+    return this.kvCacheMetrics;
   }
 
   /**
