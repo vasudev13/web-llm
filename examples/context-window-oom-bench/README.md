@@ -58,7 +58,7 @@ For a quick "does this work?" run (~1 min) instead of the full sweep, append
 `?smoke` to the URL:
 
 - `http://localhost:8888` → **full sweep**: both models, context sizes up to
-  12288 by default (many minutes).
+  10240 by default (many minutes).
 - `http://localhost:8888/?smoke` → **smoke mode**: just the 3B model and
   `[2048, 4096]`.
 
@@ -71,9 +71,9 @@ Edit the config block at the top of `src/context_window_oom_bench.ts`:
 - `ALL_MODELS` — defaults to `Llama-3.2-3B-Instruct-q4f16_1-MLC` (3B) and
   `Qwen2.5-7B-Instruct-q4f16_1-MLC` (7B). The full sweep uses both; smoke mode
   uses just the first.
-- `CONTEXT_SIZES` — full sweep is `[2048, 4096, 8192, 12288]` (capped below the
-  16384 size that crashed a 16 GB M4 Air); smoke mode is `[2048, 4096]`. Raise
-  the cap only if you have memory headroom and accept the crash risk.
+- `CONTEXT_SIZES` — full sweep is `[2048, 4096, 8192, 10240]` (capped below the
+  12288/16384 sizes that crashed a 16 GB M4 Air); smoke mode is `[2048, 4096]`.
+  Raise the cap only if you have memory headroom and accept the crash risk.
 - `PROMPT_FILL_FRACTION` — how much of the window the prompt fills before decode
   reaches the cap (default `0.85`).
 
@@ -184,12 +184,14 @@ section) to capture peak VRAM.
 | 2048  | _(rerun w/ build)_  | stop          | 1475        | 21.6         | PASS             |
 | 4096  | _(rerun w/ build)_  | stop          | 2891        | 15.1         | PASS             |
 | 8192  | _(rerun w/ build)_  | stop          | 5675        | 10.7         | PASS             |
+| 12288 | _(rerun w/ build)_  | —             | —           | —            | OOM (hard crash) |
 | 16384 | _(rerun w/ build)_  | —             | —           | —            | OOM (hard crash) |
 | 32768 | —                   | —             | —           | —            | not reached      |
 
-OOM cliff (3B): **16384** — crashed the machine at `context_window_size=16384`;
-largest stable window **8192**. Note decode throughput already degrades sharply
-with context (21.6 → 10.7 tok/s from 2K → 8K).
+OOM cliff (3B): between **8192 (stable)** and **12288 (crash)** — both 12288 and
+16384 hard-crashed the machine; largest stable window observed is **8192**. Note
+decode throughput already degrades sharply with context (21.6 → 10.7 tok/s from
+2K → 8K).
 
 ### Qwen2.5-7B-Instruct-q4f16_1-MLC
 
