@@ -47,10 +47,13 @@ const ALL_MODELS: ModelSpec[] = [
 // Full sweep uses both models; smoke mode uses just the 3B.
 const MODELS: ModelSpec[] = SMOKE ? [ALL_MODELS[0]] : ALL_MODELS;
 
-// Context windows to sweep. Note: large windows (16k/32k) require a very large
-// prefill and can take minutes per run -- trim this list while iterating.
-// Smoke mode uses just two small windows for speed.
-const CONTEXT_SIZES = SMOKE ? [2048, 4096] : [2048, 4096, 8192, 16384, 32768];
+// Context windows to sweep. Capped at 12288 by default: on a 16 GB M4 Air,
+// Llama-3.2-3B at 16384 hard-crashed the machine (not just the tab), so the
+// default deliberately stays below that to bracket the cliff (8192 stable,
+// 12288 probe) without rebooting your Mac. Raise these only if you have headroom
+// and accept the crash risk -- the crash-recovery logic will still record the
+// size that dies. Smoke mode uses just two small windows for speed.
+const CONTEXT_SIZES = SMOKE ? [2048, 4096] : [2048, 4096, 8192, 12288];
 
 // Fraction of the window filled by the prompt; the remainder is generated so
 // decode reaches the cap quickly while still stressing KV memory.

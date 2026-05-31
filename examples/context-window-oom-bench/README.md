@@ -57,8 +57,8 @@ Open the page in Chrome and **open the console**. You'll see:
 For a quick "does this work?" run (~1 min) instead of the full sweep, append
 `?smoke` to the URL:
 
-- `http://localhost:8888` → **full sweep**: both models, all 5 context sizes up
-  to 32K (many minutes).
+- `http://localhost:8888` → **full sweep**: both models, context sizes up to
+  12288 by default (many minutes).
 - `http://localhost:8888/?smoke` → **smoke mode**: just the 3B model and
   `[2048, 4096]`.
 
@@ -71,8 +71,9 @@ Edit the config block at the top of `src/context_window_oom_bench.ts`:
 - `ALL_MODELS` — defaults to `Llama-3.2-3B-Instruct-q4f16_1-MLC` (3B) and
   `Qwen2.5-7B-Instruct-q4f16_1-MLC` (7B). The full sweep uses both; smoke mode
   uses just the first.
-- `CONTEXT_SIZES` — full sweep is `[2048, 4096, 8192, 16384, 32768]`; smoke mode
-  is `[2048, 4096]`.
+- `CONTEXT_SIZES` — full sweep is `[2048, 4096, 8192, 12288]` (capped below the
+  16384 size that crashed a 16 GB M4 Air); smoke mode is `[2048, 4096]`. Raise
+  the cap only if you have memory headroom and accept the crash risk.
 - `PROMPT_FILL_FRACTION` — how much of the window the prompt fills before decode
   reaches the cap (default `0.85`).
 
