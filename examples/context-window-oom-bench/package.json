@@ -3,8 +3,8 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "start": "parcel src/context_window_oom_bench.html --port 8888",
-    "build": "parcel build src/context_window_oom_bench.html --dist-dir lib"
+    "start": "rm -rf .parcel-cache && parcel src/context_window_oom_bench.html --port 8888",
+    "build": "rm -rf .parcel-cache && parcel build src/context_window_oom_bench.html --dist-dir lib"
   },
   "devDependencies": {
     "buffer": "^5.7.1",
@@ -14,10 +14,7 @@
     "typescript": "^4.9.5",
     "url": "^0.11.3"
   },
-  "dependencies": {
-    "@mlc-ai/web-llm": "file:../.."
-  },
   "alias": {
-    "@mlc-ai/web-llm": "../../lib/index.js"
+    "@mlc-ai/web-llm": "../../src/index.ts"
   }
 }

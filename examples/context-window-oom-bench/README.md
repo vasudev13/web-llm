@@ -19,29 +19,40 @@ Inference_ project: it quantifies the wall and gives an early read on whether
 
 ## Run
 
-> **Build the local instrumented package first.** This example reads
+> **Uses the local instrumented source.** This example reads
 > `engine.getKVCacheMetrics()`, which only exists in this branch's source — it
-> is **not** in the published npm package. You must build the root package and
-> point the example at it, or the VRAM columns (`numPages`, `kvCacheMB`,
-> `estPeakVRAMMB`, …) will come out **blank**.
+> is **not** in the published npm package. The example aliases `@mlc-ai/web-llm`
+> directly to `../../src/index.ts` (Parcel compiles the TypeScript), so no
+> separate build step is needed — but the root `node_modules` must be installed
+> so the transitive deps (tvmjs, tokenizers, …) resolve.
 
 ```bash
-# 1. From the repo root: build the instrumented web-llm package into ./lib
+# 1. From the repo root: install deps (provides tvmjs etc.). No build needed.
 cd /path/to/web-llm
 npm install
-npm run build
 
-# 2. Run the benchmark example (it resolves @mlc-ai/web-llm to ../../lib)
+# 2. Run the benchmark example (resolves @mlc-ai/web-llm to ../../src)
 cd examples/context-window-oom-bench
 npm install
 npm start          # serves on http://localhost:8888
 ```
 
-If you change `src/` in the root again, re-run `npm run build` (root) and
-restart `npm start`. A quick check that instrumentation is live: the first
-result row should have non-empty `kvCacheMB` / `estPeakVRAMMB`, and the console
-should show `PagedKVCache allocation: ...` / `PagedKVCache memory estimate: ...`
-lines at model load.
+**Verify instrumentation is live** (the earlier blank-VRAM runs happened because
+a stale npm package was being served): the console should show
+`PagedKVCache allocation: ...` and `PagedKVCache memory estimate: ...` lines at
+model load, and the first result row should have non-empty `kvCacheMB` /
+`estPeakVRAMMB`. If you instead see `getKVCacheMetrics is not a function`, a
+stale build is cached — fix with:
+
+```bash
+# in examples/context-window-oom-bench
+rm -rf node_modules .parcel-cache dist
+npm install
+npm start
+```
+
+`npm start` already clears `.parcel-cache` on each launch, so editing root
+`src/` and restarting is enough to pick up changes.
 
 Open the page in Chrome and **open the console**. You'll see:
 
