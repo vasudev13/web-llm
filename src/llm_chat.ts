@@ -92,9 +92,10 @@ export interface KVCacheMetrics {
   /** Estimated peak VRAM = paramBytes + maxTempFuncBytes + kvCacheBytes. */
   estimatedTotalVRAMBytes: number;
   /**
-   * Whether kvCacheBytes was scaled to the configured context window. False
-   * means we fell back to the compile-time `metadata.kv_cache_bytes` because a
-   * compiled context length was not available to derive a per-token cost.
+   * Whether per-token KV bytes were successfully derived (from compiled
+   * metadata or from the model architecture), so `kvCacheBytes` reflects the
+   * configured context window. False means neither source was available and
+   * `kvCacheBytes` is 0 (see the warning logged at load).
    */
   scaledToConfiguredContext: boolean;
 }
@@ -524,12 +525,65 @@ export class LLMChatPipeline {
           : metadata.max_window_size > 0
             ? metadata.max_window_size
             : -1;
-      const kvBytesPerToken =
-        compiledContextLen > 0 ? compiledKvCacheBytes / compiledContextLen : 0;
+
+      // Preferred: derive per-token KV bytes from compiled metadata.
+      // Many compiled models do NOT carry `kv_cache_bytes`, in which case we
+      // compute it from the model architecture instead (the KV cache is the
+      // part that grows with context and drives the OOM cliff, so we must not
+      // leave it at 0). Per token, across the whole model:
+      //   2 (K and V) * num_layers * num_kv_heads * head_dim * kvDtypeBytes
+      const arch: Record<string, any> = {
+        ...(this.config.model_config ?? {}),
+        ...metadata, // metadata wins if it duplicates a field
+      };
+      const pick = (...keys: string[]): number | undefined => {
+        for (const k of keys) {
+          const v = arch[k];
+          if (typeof v === "number" && v > 0) return v;
+        }
+        return undefined;
+      };
+      const numLayers = pick(
+        "num_hidden_layers",
+        "num_layers",
+        "n_layer",
+        "n_layers",
+      );
+      const numAttnHeads = pick(
+        "num_attention_heads",
+        "num_heads",
+        "n_head",
+        "n_heads",
+      );
+      const numKVHeads =
+        pick("num_key_value_heads", "num_kv_heads", "n_kv_heads") ??
+        numAttnHeads;
+      const hiddenSize = pick("hidden_size", "d_model", "n_embd");
+      const headDim =
+        pick("head_dim") ??
+        (hiddenSize && numAttnHeads ? hiddenSize / numAttnHeads : undefined);
+      // KV cache is stored in fp16 for these quantized models (2 bytes/elem).
+      const kvDtypeBytes = 2;
+
+      let kvBytesPerToken = 0;
+      let kvSource = "none";
+      if (compiledKvCacheBytes > 0 && compiledContextLen > 0) {
+        kvBytesPerToken = compiledKvCacheBytes / compiledContextLen;
+        kvSource = "metadata.kv_cache_bytes";
+      } else if (numLayers && numKVHeads && headDim) {
+        kvBytesPerToken = 2 * numLayers * numKVHeads * headDim * kvDtypeBytes;
+        kvSource = "architecture";
+      } else {
+        log.warn(
+          "KVCache instrumentation: could not determine per-token KV bytes. " +
+            "Missing both metadata.kv_cache_bytes and architecture dims " +
+            `(layers=${numLayers}, kvHeads=${numKVHeads}, headDim=${headDim}). ` +
+            "kvCacheBytes will be reported as 0; please report the model's " +
+            "metadata keys so this can be supported.",
+        );
+      }
       const scaledToConfiguredContext = kvBytesPerToken > 0;
-      const kvCacheBytes = scaledToConfiguredContext
-        ? Math.round(kvBytesPerToken * maxTotalSeqLen)
-        : compiledKvCacheBytes;
+      const kvCacheBytes = Math.round(kvBytesPerToken * maxTotalSeqLen);
       const pageSize = defaultPageSize;
       const numPages = Math.ceil(maxTotalSeqLen / pageSize);
       this.kvCacheMetrics = {
@@ -557,8 +611,8 @@ export class LLMChatPipeline {
       log.info(
         `PagedKVCache memory estimate: params=${toMB(paramBytes)}MB, ` +
           `tempBuffers=${toMB(maxTempFuncBytes)}MB, ` +
-          `kvCache=${toMB(kvCacheBytes)}MB` +
-          `${scaledToConfiguredContext ? "" : " (compile-time, unscaled)"}, ` +
+          `kvCache=${toMB(kvCacheBytes)}MB ` +
+          `(kvBytes/token=${kvBytesPerToken}, source=${kvSource}), ` +
           `estPeakVRAM=${toMB(this.kvCacheMetrics.estimatedTotalVRAMBytes)}MB`,
       );
     }
