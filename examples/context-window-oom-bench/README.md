@@ -186,50 +186,68 @@ Estimated **KV cache** / **total peak VRAM** (params + ~0.4–0.6 GB temp + KV):
 | 16384 | ~1.79 GB | ~4.1 GB      | ~0.90 GB | ~6.0 GB      |
 | 32768 | ~3.58 GB | ~5.9 GB      | ~1.79 GB | ~6.9 GB      |
 
-**7B @ 16K feasibility (M4 Air, 16 GB unified memory):** the ~6 GB total
-estimate sits comfortably under 16 GB unified memory, so 7B @ 16K is **likely
-feasible** from a total-memory standpoint — **no 3B pivot indicated yet**. The
-real risks to confirm empirically are (a) WebGPU per-buffer limits
-(`maxStorageBufferBindingSize` / `maxBufferSize`, queryable via
-`engine.getMaxStorageBufferBindingSize()`), which can bite before total memory
-does, especially at 32K, and (b) browser/OS memory reservation. Treat the table
-above as estimates and replace it with measured numbers below.
+**7B @ 16K feasibility (M4 Air, 16 GB unified memory) — pre-run estimate.** The
+~6 GB total estimate sits under 16 GB unified memory, so 7B @ 16K looked
+feasible on a total-memory basis. **This was partly borne out and partly
+overturned by measurement** — see the Empirical results below. Memory was not
+the blocker (neither total memory nor the per-buffer cap), but _usability_ was:
+7B is already ~5 tok/s with multi-minute latency by 10K, so 16K is functionally
+unusable. The measured numbers below supersede this estimate.
 
-## Empirical results (fill after running on the M4 Air)
+## Empirical results
 
-Device: \_\_\_\_ (e.g. MacBook Air M4, 16 GB) · Browser: \_\_\_\_ ·
-`maxStorageBufferBindingSize`: \_\_\_\_
+Device: **MacBook Air M4, 16 GB unified memory** · Browser: **Chrome (WebGPU)** ·
+`maxStorageBufferBindingSize`: **1024 MB** (1 GB).
+
+> Measured against the local instrumented build (KV bytes derived from
+> architecture; `kvScaled: true`). Earlier runs with blank VRAM columns used the
+> published npm package and are superseded.
 
 ### Llama-3.2-3B-Instruct-q4f16_1-MLC
 
-Run 1 (MacBook Air M4). VRAM columns blank because this run used the published
-npm package without instrumentation — re-run against the local build (see Run
-section) to capture peak VRAM.
+| ctx   | est peak VRAM (MB) | kvCache (MB) | largest KV buf (MB) | finish | decode tok/s | e2e (s) | outcome          |
+| ----- | ------------------ | ------------ | ------------------- | ------ | ------------ | ------- | ---------------- |
+| 2048  | 1997               | 224          | 4                   | stop   | 21.7         | 7.6     | PASS             |
+| 4096  | 2221               | 448          | 8                   | stop   | 16.5         | 16.1    | PASS             |
+| 8192  | 2669               | 896          | 16                  | stop   | 11.0         | 38.2    | PASS             |
+| 10240 | 2893               | 1120         | 20                  | stop   | 9.4          | 52.5    | PASS             |
+| 12288 | ~3117 (est)        | ~1344 (est)  | ~24 (est)           | —      | —            | —       | OOM (hard crash) |
+| 16384 | ~3564 (est)        | ~1792 (est)  | ~32 (est)           | —      | —            | —       | OOM (hard crash) |
 
-| ctx   | peak VRAM (est, MB) | finish_reason | peak KV len | decode tok/s | outcome          |
-| ----- | ------------------- | ------------- | ----------- | ------------ | ---------------- |
-| 2048  | _(rerun w/ build)_  | stop          | 1475        | 21.6         | PASS             |
-| 4096  | _(rerun w/ build)_  | stop          | 2891        | 15.1         | PASS             |
-| 8192  | _(rerun w/ build)_  | stop          | 5675        | 10.7         | PASS             |
-| 12288 | _(rerun w/ build)_  | —             | —           | —            | OOM (hard crash) |
-| 16384 | _(rerun w/ build)_  | —             | —           | —            | OOM (hard crash) |
-| 32768 | —                   | —             | —           | —            | not reached      |
-
-OOM cliff (3B): between **8192 (stable)** and **12288 (crash)** — both 12288 and
-16384 hard-crashed the machine; largest stable window observed is **8192**. Note
-decode throughput already degrades sharply with context (21.6 → 10.7 tok/s from
-2K → 8K).
+OOM cliff (3B): between **10240 (stable)** and **12288 (crash)**. Crucially, the
+crash happens at only **~3 GB estimated VRAM on a 16 GB machine**, and the
+largest single KV buffer (~24 MB) is **far** under the 1024 MB per-buffer cap —
+so the cliff is **neither** total-memory exhaustion **nor** a single-buffer
+limit. It is most consistent with cumulative WebGPU allocation pressure /
+fragmentation across the many paged buffers tipping the browser/OS over on
+unified memory. Decode throughput also halves from 2K→8K (21.7 → 11.0 tok/s).
 
 ### Qwen2.5-7B-Instruct-q4f16_1-MLC
 
-| ctx   | peak VRAM (est, MB) | finish_reason | peak KV len | decode tok/s | outcome |
-| ----- | ------------------- | ------------- | ----------- | ------------ | ------- |
-| 2048  |                     |               |             |              |         |
-| 4096  |                     |               |             |              |         |
-| 8192  |                     |               |             |              |         |
-| 16384 |                     |               |             |              |         |
-| 32768 |                     |               |             |              |         |
+| ctx   | est peak VRAM (MB) | kvCache (MB) | largest KV buf (MB) | finish | decode tok/s | e2e (s) | outcome     |
+| ----- | ------------------ | ------------ | ------------------- | ------ | ------------ | ------- | ----------- |
+| 2048  | 5438               | 112          | 2                   | length | 10.7         | 70      | CONTEXT_CAP |
+| 4096  | 5550               | 224          | 4                   | stop   | 8.2          | 106     | PASS        |
+| 8192  | 5774               | 448          | 8                   | stop   | 5.7          | 175     | PASS        |
+| 10240 | 5886               | 560          | 10                  | stop   | 5.0          | 182     | PASS        |
 
-OOM cliff (7B): \_\_\_\_
+OOM cliff (7B): **no OOM observed up to 10240** — 7B is not memory-limited in
+this range (~5.9 GB peak on 16 GB). It is instead **performance-limited**:
+decode falls to ~5 tok/s at 8K–10K and end-to-end latency runs **3+ minutes per
+request**. (An earlier 10240 run logged a multi-hour e2e, consistent with the
+machine thrashing/sleeping under sustained load.)
+
+### Verdict — 7B@16K feasibility (Risk #4)
+
+- **Memory:** 7B@16K is _not_ blocked by total memory (~6 GB peak ≪ 16 GB) nor by
+  the per-buffer cap (largest KV buffer ~16 MB ≪ 1024 MB at 16K).
+- **Usability:** 7B is already at ~5 tok/s / multi-minute latency by 10K, so 16K
+  would be functionally unusable even if it loads. **7B is not viable for
+  interactive use on the M4 Air** — a **3B pivot is the practical choice**.
+- **3B reality:** even 3B hard-crashes the machine at 12288, so the usable
+  ceiling today is **~10K context**. This is the baseline KV-cache eviction
+  needs to beat, and the crash mechanism (cumulative allocation, not a single
+  oversized buffer) is exactly what paged eviction addresses.
+  OOM cliff (7B): \_\_\_\_
 
 **7B @ 16K viable?** \_\_\_\_ · **3B pivot needed?** \_\_\_\_
