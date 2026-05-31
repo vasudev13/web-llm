@@ -65,23 +65,39 @@ Open the page in Chrome and **open the console**. You'll see:
 
 ### URL modes (no code editing)
 
-| URL                             | What it does                                                            |
-| ------------------------------- | ----------------------------------------------------------------------- |
-| `http://localhost:8888`         | **Full sweep** — both models, `[2048, 4096, 8192, 10240]` (minutes).    |
-| `…/?smoke`                      | **Smoke** — 3B only, `[2048, 4096]` (~1 min sanity check).              |
-| `…/?fast`                       | **Fast cliff-finder** — `max_tokens=8`, sweeps up through 16384.        |
-| `…/?ctx=11264,12288`            | **Explicit context list** — probe exactly these sizes.                  |
-| `…/?fast&ctx=11264,12288,16384` | Fast mode over a custom list — the safe way to pin the exact OOM cliff. |
+| URL                             | What it does                                                                   |
+| ------------------------------- | ------------------------------------------------------------------------------ |
+| `…/?coverage`                   | **Full coverage (recommended)** — runs the entire VAS-49 matrix in one launch. |
+| `http://localhost:8888`         | **Full sweep** — both models, `[2048, 4096, 8192, 10240]` (minutes).           |
+| `…/?smoke`                      | **Smoke** — 3B only, `[2048, 4096]` (~1 min sanity check).                     |
+| `…/?fast`                       | **Fast cliff-finder** — `max_tokens=8`, sweeps up through 16384.               |
+| `…/?ctx=11264,12288`            | **Explicit context list** — probe exactly these sizes.                         |
+| `…/?fast&ctx=11264,12288,16384` | Fast mode over a custom list — the safe way to pin the exact OOM cliff.        |
 
-**Why `?fast` is safe for probing high context:** the OOM cliff is hit at
-KV-cache **allocation / prefill** time, not during long decode. So you don't
-need to generate hundreds of tokens to trigger it — `max_tokens=8` makes each
-run finish in seconds while still reproducing the crash. This lets you pin the
-exact cliff (e.g. binary-search 11264) and find **7B's** cliff (which the slow
-default sweep never reached) without multi-minute runs.
+**`?coverage` — the one-shot that addresses every acceptance gap.** Open
+`http://localhost:8888/?coverage` and it runs three phases **per model** (3B and
+7B), labelling each row with a `phase` column:
 
-The active mode and the context list are printed to the console and status line
-at startup.
+1. **`cap-4k`** — explicit 4K context-cap reproduction (full decode); expects
+   `finish_reason="length"` / `CONTEXT_CAP` at `ctx=4096` (issue #752).
+2. **`vram-perf`** — VRAM + throughput curve over the known-safe sizes
+   (`2048, 4096, 8192, 10240`), full decode.
+3. **`cliff`** — a fast (`max_tokens=8`) auto-escalating climb up
+   `8192 … 65536` that **stops each model at its first OOM**, so the OOM cliff
+   is found for **both** 3B and 7B. Nothing past a model's cliff is attempted.
+
+Every run also records the real-memory probe (`measuredMemMB`), so the estimated
+peak VRAM is validated against observed memory. Combined with crash-recovery
+(below), if a phase-3 climb crashes the machine, just reload `?coverage` — it
+records that size as the cliff, skips it, and continues.
+
+**Why the fast cliff probe is safe at high context:** the OOM cliff is hit at
+KV-cache **allocation / prefill** time, not during long decode — so `max_tokens=8`
+reproduces the crash in seconds, without generating hundreds of tokens. (`?fast`
+exposes this mode standalone; `?coverage` uses it for phase 3.)
+
+The active mode, phase, and context list are printed to the console and status
+line at startup.
 
 ### Other config
 
@@ -260,21 +276,21 @@ machine thrashing/sleeping under sustained load.)
   needs to beat, and the crash mechanism (cumulative allocation, not a single
   oversized buffer) is exactly what paged eviction addresses.
 
-### Open items / remaining tests
+### Full coverage — run `?coverage` to close every gap in one launch
 
-These refine the findings above; run them with the fast cliff-finder so they
-are cheap and crash-safe (`?fast`, `max_tokens=8`):
+The tables above came from partial runs. To get complete, defensible coverage of
+all VAS-49 acceptance criteria, open **`http://localhost:8888/?coverage`** once.
+It automatically produces, for **both** 3B and 7B:
 
-1. **7B OOM cliff not yet found.** 7B was only swept to 10240 (no OOM); its
-   actual memory cliff is unknown. Run `?fast&ctx=12288,16384,24576,32768` for
-   7B to find it. (7B is already perf-unusable by 10K, but the issue explicitly
-   asks for the cliff of _both_ models.)
-2. **Exact 3B cliff.** Currently bracketed 10240–12288. Run
-   `?fast&ctx=11264,11776` to pin it.
-3. **Validate estimated VRAM against real memory.** All peak-VRAM figures are
-   _computed_. The new `measuredMemMB` column captures real memory when Chrome
-   is cross-origin isolated; confirm the estimates track the observed numbers,
-   which underpins the "crash is not total-memory exhaustion" conclusion.
-4. **Explicit 4K-cap repro (issue #752).** Confirm a clean
-   `finish_reason="length"` at exactly `context_window_size=4096` in normal
-   (non-fast) mode — the canonical "4K context cap" reproduction.
+| Gap                                                 | How `?coverage` closes it                                             | `phase`     |
+| --------------------------------------------------- | --------------------------------------------------------------------- | ----------- |
+| **4K context cap (#752)** not explicitly reproduced | Full-decode run at exactly `ctx=4096`, expecting `CONTEXT_CAP`        | `cap-4k`    |
+| **VRAM + perf curve**                               | Full-decode runs at `2048/4096/8192/10240`                            | `vram-perf` |
+| **7B OOM cliff never found**                        | Fast climb `8192…65536`, stops 7B at its first OOM                    | `cliff`     |
+| **3B cliff only bracketed (10240–12288)**           | Same fast climb pins the exact 3B cliff                               | `cliff`     |
+| **Peak VRAM only estimated**                        | `measuredMemMB` real-memory probe on every run validates the estimate | all         |
+
+The climb stops each model at its first OOM, so nothing past the cliff is
+attempted; crash-recovery makes even a hard crash resumable on reload. After it
+finishes, **Download JSON** and replace the empirical tables above with the
+per-phase results.

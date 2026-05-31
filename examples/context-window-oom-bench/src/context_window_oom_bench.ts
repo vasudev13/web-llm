@@ -41,11 +41,32 @@ const SMOKE = params.has("smoke");
 // override the sweep, e.g. `?fast&ctx=11264,12288,16384`.
 const FAST = params.has("fast");
 
+// Coverage mode: append `?coverage` to run the COMPLETE test matrix in one
+// launch, addressing every VAS-49 acceptance gap automatically:
+//   Phase 1 (cap-4k)   -- explicit 4K context-cap reproduction (full decode,
+//                         expects finish_reason="length" at ctx=4096).
+//   Phase 2 (vram-perf) -- VRAM + throughput curve over safe context sizes.
+//   Phase 3 (cliff)    -- fast (max_tokens=8) auto-escalating climb per model
+//                         that STOPS that model on its first OOM, so the OOM
+//                         cliff is found for BOTH 3B and 7B without manual URLs.
+// Each run still records the real-memory probe, so estimated VRAM is validated.
+const COVERAGE = params.has("coverage");
+
 // Optional explicit context list, e.g. `?ctx=4096,8192,11264`.
 const CTX_OVERRIDE = (params.get("ctx") ?? "")
   .split(",")
   .map((s) => parseInt(s.trim(), 10))
   .filter((n) => Number.isFinite(n) && n > 0);
+
+// Context ladder for the coverage cliff-finder (Phase 3). The climb stops per
+// model at the first OOM, so going high here is safe -- nothing past the cliff
+// actually runs for that model.
+const COVERAGE_CLIFF_LADDER = [
+  8192, 10240, 11264, 12288, 14336, 16384, 20480, 24576, 32768, 40960, 49152,
+  65536,
+];
+// Context sizes for the VRAM/perf curve (Phase 2) -- known-safe, full decode.
+const COVERAGE_CURVE = [2048, 4096, 8192, 10240];
 
 const ALL_MODELS: ModelSpec[] = [
   {
@@ -99,6 +120,8 @@ interface RunResult {
   sizeClass: string;
   contextSize: number;
   outcome: Outcome;
+  // Which coverage phase produced this row (coverage mode only).
+  phase?: string;
   finishReason?: string;
   promptTokens?: number;
   completionTokens?: number;
@@ -351,12 +374,19 @@ async function loadEngine(modelId: string, ctx: number): Promise<void> {
   }
 }
 
-async function runOne(spec: ModelSpec, ctx: number): Promise<RunResult> {
+async function runOne(
+  spec: ModelSpec,
+  ctx: number,
+  opts: { maxTokens?: number; phase?: string } = {},
+): Promise<RunResult> {
+  // Per-run max_tokens: explicit override (coverage) > FAST global > fill window.
+  const maxTokens = opts.maxTokens ?? MAX_TOKENS;
   const result: RunResult = {
     model: spec.label,
     sizeClass: spec.sizeClass,
     contextSize: ctx,
     outcome: "OTHER_ERROR",
+    phase: opts.phase,
   };
 
   // 1. Load / reload at the target context window (allocation-time OOM lives here).
@@ -400,9 +430,9 @@ async function runOne(spec: ModelSpec, ctx: number): Promise<RunResult> {
     const reply = await engine!.chat.completions.create({
       messages: [{ role: "user", content: prompt }],
       temperature: 0,
-      // In FAST mode, a handful of tokens is enough -- the OOM cliff is hit at
+      // A small max_tokens is enough to find the cliff -- it is hit at
       // allocation/prefill time, not during decode. Otherwise fill the window.
-      max_tokens: MAX_TOKENS ?? ctx,
+      max_tokens: maxTokens ?? ctx,
     });
     const choice = reply.choices[0];
     const usage = reply.usage;
@@ -421,10 +451,12 @@ async function runOne(spec: ModelSpec, ctx: number): Promise<RunResult> {
     result.prefillTokPerSec = extra?.prefill_tokens_per_s;
     result.decodeTokPerSec = extra?.decode_tokens_per_s;
     result.e2eLatencyS = extra?.e2e_latency_s;
-    // In FAST mode the run is capped early, so "length" is expected and not a
-    // context-cap finding; only treat it as CONTEXT_CAP in normal mode.
+    // When the run is capped early (small max_tokens), "length" is expected and
+    // not a context-cap finding; only treat it as CONTEXT_CAP for full-decode
+    // runs that fill the whole window.
+    const filledWindow = maxTokens === undefined;
     result.outcome =
-      !MAX_TOKENS && result.finishReason === "length" ? "CONTEXT_CAP" : "PASS";
+      filledWindow && result.finishReason === "length" ? "CONTEXT_CAP" : "PASS";
   } catch (err) {
     const c = classifyError(err);
     result.outcome = c.outcome;
@@ -629,37 +661,68 @@ async function main() {
     renderTable(results);
   }
 
-  // Skip (model, ctx) pairs we already have a result for, so reloading after a
-  // crash resumes the sweep instead of repeating it.
-  const done = new Set(results.map((r) => `${r.model}@${r.contextSize}`));
+  // Skip (model, ctx, phase) keys we already have a result for, so reloading
+  // after a crash resumes instead of repeating.
+  const keyOf = (r: { model: string; contextSize: number; phase?: string }) =>
+    `${r.model}@${r.contextSize}#${r.phase ?? ""}`;
+  const done = new Set(results.map(keyOf));
 
-  const mode = SMOKE ? "SMOKE" : FAST ? "FAST" : "FULL";
-  setStatus(
-    `${mode} sweep: ${MODELS.length} model(s) x ` +
-      `${CONTEXT_SIZES.length} context size(s) [${CONTEXT_SIZES.join(", ")}]` +
-      `${FAST ? ` (max_tokens=${MAX_TOKENS}, cliff-finder)` : ""}`,
-  );
-  for (const spec of MODELS) {
-    for (const ctx of CONTEXT_SIZES) {
-      if (done.has(`${spec.label}@${ctx}`)) {
-        console.log(`[oom-bench] skipping already-done ${spec.label}@${ctx}`);
-        continue;
-      }
-      setPending(spec, ctx); // mark in-flight; recovered if the tab/OS crashes
-      const result = await runOne(spec, ctx);
-      clearPending();
-      results.push(result);
-      saveResults(results); // persist immediately -- survives a tab/OS crash
-      console.log("[oom-bench] result:", result);
-      renderTable(results);
+  // Run one (model, ctx) and record it durably (pending marker + persist +
+  // render). Returns the result so callers can branch on the outcome.
+  const runAndRecord = async (
+    spec: ModelSpec,
+    ctx: number,
+    opts: { maxTokens?: number; phase?: string } = {},
+  ): Promise<RunResult | undefined> => {
+    if (
+      done.has(
+        keyOf({ model: spec.label, contextSize: ctx, phase: opts.phase }),
+      )
+    ) {
+      console.log(
+        `[oom-bench] skipping already-done ${spec.label}@${ctx} (${opts.phase ?? "-"})`,
+      );
+      return results.find(
+        (r) =>
+          keyOf(r) ===
+          keyOf({ model: spec.label, contextSize: ctx, phase: opts.phase }),
+      );
     }
-    // Free the model between size classes so the next one starts clean.
+    setPending(spec, ctx); // mark in-flight; recovered if the tab/OS crashes
+    const result = await runOne(spec, ctx, opts);
+    clearPending();
+    results.push(result);
+    done.add(keyOf(result));
+    saveResults(results); // persist immediately -- survives a tab/OS crash
+    console.log("[oom-bench] result:", result);
+    renderTable(results);
+    return result;
+  };
+
+  const freeEngine = async () => {
     try {
       await engine?.unload();
     } catch {
       /* ignore */
     }
     engine = undefined;
+  };
+
+  if (COVERAGE) {
+    await runCoverage(runAndRecord, freeEngine);
+  } else {
+    const mode = SMOKE ? "SMOKE" : FAST ? "FAST" : "FULL";
+    setStatus(
+      `${mode} sweep: ${MODELS.length} model(s) x ` +
+        `${CONTEXT_SIZES.length} context size(s) [${CONTEXT_SIZES.join(", ")}]` +
+        `${FAST ? ` (max_tokens=${MAX_TOKENS}, cliff-finder)` : ""}`,
+    );
+    for (const spec of MODELS) {
+      for (const ctx of CONTEXT_SIZES) {
+        await runAndRecord(spec, ctx);
+      }
+      await freeEngine(); // start each model clean
+    }
   }
 
   setStatus(
@@ -670,6 +733,52 @@ async function main() {
   summarizeCliff(results);
   console.log("\n===== CSV =====\n" + toCSV(results));
   console.log("\n===== JSON =====\n" + JSON.stringify(results, null, 2));
+}
+
+/**
+ * Coverage mode: run the COMPLETE VAS-49 matrix in one launch.
+ *
+ * Phase 1 (cap-4k): explicit 4K context-cap reproduction with full decode --
+ *   expects finish_reason="length" / outcome CONTEXT_CAP at ctx=4096.
+ * Phase 2 (vram-perf): VRAM + throughput curve over known-safe sizes (full
+ *   decode), per model.
+ * Phase 3 (cliff): fast (max_tokens=8) auto-escalating climb that stops each
+ *   model at its FIRST OOM -- finding the OOM cliff for BOTH 3B and 7B without
+ *   manual URL juggling. Nothing past a model's cliff is ever attempted.
+ */
+async function runCoverage(
+  runAndRecord: (
+    spec: ModelSpec,
+    ctx: number,
+    opts?: { maxTokens?: number; phase?: string },
+  ) => Promise<RunResult | undefined>,
+  freeEngine: () => Promise<void>,
+): Promise<void> {
+  for (const spec of ALL_MODELS) {
+    // Phase 1: explicit 4K cap repro (full decode).
+    setStatus(`COVERAGE ${spec.label}: Phase 1 -- 4K context-cap repro`);
+    await runAndRecord(spec, 4096, { phase: "cap-4k" });
+
+    // Phase 2: VRAM + perf curve at safe sizes (full decode).
+    for (const ctx of COVERAGE_CURVE) {
+      setStatus(`COVERAGE ${spec.label}: Phase 2 -- VRAM/perf @ ${ctx}`);
+      await runAndRecord(spec, ctx, { phase: "vram-perf" });
+    }
+
+    // Phase 3: fast cliff climb; stop this model at the first OOM.
+    for (const ctx of COVERAGE_CLIFF_LADDER) {
+      setStatus(`COVERAGE ${spec.label}: Phase 3 -- cliff probe @ ${ctx}`);
+      const r = await runAndRecord(spec, ctx, { maxTokens: 8, phase: "cliff" });
+      if (r?.outcome === "OOM_DEVICE_LOST") {
+        console.log(
+          `[oom-bench] ${spec.label}: OOM cliff found at ctx=${ctx}; ` +
+            "stopping this model's climb.",
+        );
+        break;
+      }
+    }
+    await freeEngine(); // clean slate before the next model
+  }
 }
 
 main();
