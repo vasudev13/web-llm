@@ -121,6 +121,22 @@ and you have your data — including the size that killed it.
 fields from `engine.getKVCacheMetrics()`: `numPages`, `paramBytes`,
 `maxTempFuncBytes`, `kvCacheBytes`, `estimatedTotalVRAMBytes`.
 
+**Buffer-limit analysis (is the cliff a per-buffer cap or total memory?).**
+The harness also queries the device's `maxStorageBufferBindingSize` once via
+`engine.getMaxStorageBufferBindingSize()` and compares it to the largest single
+KV storage buffer (`largestKVBufferBytes` from the metrics — one layer's K/V
+tensor, which scales with context). Columns:
+
+- `largestKVBufferMB` — biggest single KV allocation at this context size.
+- `maxStorageBufferMB` — the device's per-buffer cap.
+- `bufferLimitHeadroomPct` — `largestKVBuffer / maxStorageBuffer * 100`.
+- `exceedsBufferLimit` — `true` if a single buffer is over the cap.
+
+If a crash occurs while estimated peak VRAM is far below physical memory but
+`bufferLimitHeadroomPct` is near/over 100%, the OOM cliff is a **per-buffer
+limit**, not total-memory exhaustion — precisely the wall KV paging/eviction is
+meant to remove. The final console "OOM cliff summary" prints this diagnosis.
+
 **Outcome classification:**
 
 | Outcome           | Meaning                                                                          |

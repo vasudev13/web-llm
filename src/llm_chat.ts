@@ -91,6 +91,22 @@ export interface KVCacheMetrics {
   kvCacheBytes: number;
   /** Estimated peak VRAM = paramBytes + maxTempFuncBytes + kvCacheBytes. */
   estimatedTotalVRAMBytes: number;
+  /** Model layers used for KV math (undefined if not found in metadata). */
+  numLayers?: number;
+  /** KV heads used for KV math (undefined if not found). */
+  numKVHeads?: number;
+  /** Head dim used for KV math (undefined if not found). */
+  headDim?: number;
+  /**
+   * Estimated bytes of the largest single KV storage buffer. WebLLM's paged KV
+   * cache stores K and V per layer as separate tensors of shape
+   * [maxTotalSeqLen, numKVHeads, headDim]; this is the size of one such tensor
+   * = maxTotalSeqLen * numKVHeads * headDim * kvDtypeBytes. This single
+   * allocation is what can exceed the device's `maxStorageBufferBindingSize` /
+   * `maxBufferSize` and trigger a device-lost well before total memory is
+   * exhausted -- the likely mechanism of the OOM cliff. 0 if dims unknown.
+   */
+  largestKVBufferBytes: number;
   /**
    * Whether per-token KV bytes were successfully derived (from compiled
    * metadata or from the model architecture), so `kvCacheBytes` reflects the
@@ -586,6 +602,14 @@ export class LLMChatPipeline {
       const kvCacheBytes = Math.round(kvBytesPerToken * maxTotalSeqLen);
       const pageSize = defaultPageSize;
       const numPages = Math.ceil(maxTotalSeqLen / pageSize);
+      // Largest single KV storage buffer: one layer's K (or V) tensor of shape
+      // [maxTotalSeqLen, numKVHeads, headDim]. This single allocation is what
+      // can exceed maxStorageBufferBindingSize and cause a device-lost before
+      // total memory runs out.
+      const largestKVBufferBytes =
+        numKVHeads && headDim
+          ? maxTotalSeqLen * numKVHeads * headDim * kvDtypeBytes
+          : 0;
       this.kvCacheMetrics = {
         contextWindowSize: this.contextWindowSize,
         slidingWindowSize: this.slidingWindowSize,
@@ -599,6 +623,10 @@ export class LLMChatPipeline {
         kvBytesPerToken,
         kvCacheBytes,
         estimatedTotalVRAMBytes: paramBytes + maxTempFuncBytes + kvCacheBytes,
+        numLayers,
+        numKVHeads,
+        headDim,
+        largestKVBufferBytes,
         scaledToConfiguredContext,
       };
       const toMB = (b: number) => (b / 1024 / 1024).toFixed(2);
@@ -613,6 +641,7 @@ export class LLMChatPipeline {
           `tempBuffers=${toMB(maxTempFuncBytes)}MB, ` +
           `kvCache=${toMB(kvCacheBytes)}MB ` +
           `(kvBytes/token=${kvBytesPerToken}, source=${kvSource}), ` +
+          `largestKVBuffer=${toMB(largestKVBufferBytes)}MB, ` +
           `estPeakVRAM=${toMB(this.kvCacheMetrics.estimatedTotalVRAMBytes)}MB`,
       );
     }

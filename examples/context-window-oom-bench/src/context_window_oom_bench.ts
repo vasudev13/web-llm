@@ -83,8 +83,16 @@ interface RunResult {
   kvCacheMB?: number;
   estPeakVRAMMB?: number;
   kvScaled?: boolean;
+  // Buffer-limit analysis: is the OOM cliff a per-buffer cap, not total memory?
+  largestKVBufferMB?: number;
+  maxStorageBufferMB?: number;
+  bufferLimitHeadroomPct?: number; // largestKVBuffer / maxStorageBuffer * 100
+  exceedsBufferLimit?: boolean;
   error?: string;
 }
+
+// Device WebGPU limit, queried once and reused for every run.
+let maxStorageBufferBytes: number | undefined;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -237,6 +245,20 @@ function fillMetrics(r: RunResult, m: KVCacheMetrics) {
   r.kvCacheMB = toMB(m.kvCacheBytes);
   r.estPeakVRAMMB = toMB(m.estimatedTotalVRAMBytes);
   r.kvScaled = m.scaledToConfiguredContext;
+
+  // Buffer-limit analysis: compare the largest single KV buffer against the
+  // device's maxStorageBufferBindingSize. If the largest buffer approaches or
+  // exceeds the limit, the cliff is a per-buffer cap (which paging/eviction
+  // can fix), not total-memory exhaustion.
+  if (m.largestKVBufferBytes > 0) {
+    r.largestKVBufferMB = toMB(m.largestKVBufferBytes);
+    if (maxStorageBufferBytes && maxStorageBufferBytes > 0) {
+      r.maxStorageBufferMB = toMB(maxStorageBufferBytes);
+      r.bufferLimitHeadroomPct =
+        (m.largestKVBufferBytes / maxStorageBufferBytes) * 100;
+      r.exceedsBufferLimit = m.largestKVBufferBytes > maxStorageBufferBytes;
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -284,6 +306,20 @@ async function runOne(spec: ModelSpec, ctx: number): Promise<RunResult> {
   }
 
   // 2. Snapshot PagedKVCache instrumentation (peak-VRAM estimate).
+  // Query the device's max storage buffer size once -- this is the cap a single
+  // KV buffer must stay under, and the likely cause of the OOM cliff.
+  if (maxStorageBufferBytes === undefined) {
+    try {
+      maxStorageBufferBytes = await engine!.getMaxStorageBufferBindingSize();
+      console.log(
+        `[oom-bench] device maxStorageBufferBindingSize = ` +
+          `${(maxStorageBufferBytes / 1024 / 1024).toFixed(0)} MB`,
+      );
+    } catch (err) {
+      console.warn("[oom-bench] getMaxStorageBufferBindingSize failed:", err);
+      maxStorageBufferBytes = 0; // don't retry every run
+    }
+  }
   try {
     const m = await engine!.getKVCacheMetrics(spec.modelId);
     if (m) fillMetrics(result, m);
@@ -355,6 +391,10 @@ function toCSV(rows: RunResult[]): string {
     "kvCacheMB",
     "estPeakVRAMMB",
     "kvScaled",
+    "largestKVBufferMB",
+    "maxStorageBufferMB",
+    "bufferLimitHeadroomPct",
+    "exceedsBufferLimit",
     "error",
   ];
   const lines = rows.map((r) =>
@@ -376,6 +416,10 @@ function toCSV(rows: RunResult[]): string {
       fmt(r.kvCacheMB),
       fmt(r.estPeakVRAMMB),
       r.kvScaled ?? "",
+      fmt(r.largestKVBufferMB),
+      fmt(r.maxStorageBufferMB),
+      fmt(r.bufferLimitHeadroomPct, 1),
+      r.exceedsBufferLimit ?? "",
       (r.error ?? "").replace(/[\r\n,]+/g, " "),
     ].join(","),
   );
@@ -392,7 +436,8 @@ function renderTable(rows: RunResult[]) {
     ["pages", (r) => String(r.numPages ?? "")],
     ["kvCacheMB", (r) => fmt(r.kvCacheMB)],
     ["estPeakVRAM(MB)", (r) => fmt(r.estPeakVRAMMB)],
-    ["prefill tok/s", (r) => fmt(r.prefillTokPerSec, 1)],
+    ["maxKVbuf(MB)", (r) => fmt(r.largestKVBufferMB)],
+    ["bufLimit%", (r) => fmt(r.bufferLimitHeadroomPct, 1)],
     ["decode tok/s", (r) => fmt(r.decodeTokPerSec, 1)],
   ];
   const thead = "<tr>" + cols.map(([h]) => `<th>${h}</th>`).join("") + "</tr>";
@@ -447,6 +492,27 @@ function summarizeCliff(rows: RunResult[]) {
           modelRows[modelRows.length - 1]?.contextSize ?? "?"
         }`;
     console.log(`${spec.label} [${spec.sizeClass}]: ${cliff}`);
+
+    // Buffer-limit vs total-memory diagnosis at the largest stable window.
+    const lastWithBuf = [...modelRows]
+      .reverse()
+      .find((r) => r.largestKVBufferMB !== undefined);
+    if (lastWithBuf?.maxStorageBufferMB) {
+      const pct = lastWithBuf.bufferLimitHeadroomPct ?? 0;
+      console.log(
+        `  buffer analysis @ ctx=${lastWithBuf.contextSize}: ` +
+          `largest KV buffer ${fmt(lastWithBuf.largestKVBufferMB)}MB vs ` +
+          `device max ${fmt(lastWithBuf.maxStorageBufferMB)}MB (${fmt(pct, 1)}% of cap). ` +
+          (lastWithBuf.estPeakVRAMMB
+            ? `est. peak VRAM ${fmt(lastWithBuf.estPeakVRAMMB)}MB. `
+            : "") +
+          (firstOOM
+            ? "If peak VRAM at the cliff is far below physical memory, the cliff " +
+              "is most likely a per-buffer cap (maxStorageBufferBindingSize), " +
+              "not total-memory exhaustion -- exactly what KV paging/eviction targets."
+            : ""),
+      );
+    }
   }
   console.log("=============================\n");
 }
