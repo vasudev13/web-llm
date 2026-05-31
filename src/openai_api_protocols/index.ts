@@ -15,16 +15,13 @@
  * limitations under the License.
  */
 
-export {
-  Chat,
+export type {
   ChatCompletionRequestBase,
   ChatCompletionRequestNonStreaming,
   ChatCompletionRequestStreaming,
   ChatCompletionRequest,
   ChatCompletion,
   ChatCompletionChunk,
-  ChatCompletionRequestUnsupportedFields,
-  postInitAndCheckFields as postInitAndCheckFieldsChatCompletion,
   ChatCompletionContentPart,
   ChatCompletionContentPartText,
   ChatCompletionContentPartImage,
@@ -47,22 +44,31 @@ export {
   ResponseFormat,
   ChatCompletionFinishReason,
 } from "./chat_completion";
-
 export {
-  Completions,
+  Chat,
+  ChatCompletionRequestUnsupportedFields,
+  postInitAndCheckFields as postInitAndCheckFieldsChatCompletion,
+} from "./chat_completion";
+
+export type {
   CompletionCreateParamsNonStreaming,
   CompletionCreateParamsStreaming,
   CompletionCreateParamsBase,
   CompletionCreateParams,
   Completion,
   CompletionChoice,
+} from "./completion";
+export {
+  Completions,
   postInitAndCheckFields as postInitAndCheckFieldsCompletion,
 } from "./completion";
 
-export {
-  Embeddings,
+export type {
   Embedding,
   EmbeddingCreateParams,
   CreateEmbeddingResponse,
+} from "./embedding";
+export {
+  Embeddings,
   postInitAndCheckFields as postInitAndCheckFieldsEmbedding,
 } from "./embedding";

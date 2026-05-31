@@ -1,9 +1,11 @@
-export {
+export type {
   ModelRecord,
   AppConfig,
   ChatOptions,
   MLCEngineConfig,
   GenerationConfig,
+} from "./config";
+export {
   ModelType,
   prebuiltAppConfig,
   modelVersion,
@@ -21,7 +23,7 @@ export {
 
 export { IntegrityError } from "./error";
 
-export {
+export type {
   InitProgressCallback,
   InitProgressReport,
   MLCEngineInterface,
@@ -47,7 +49,11 @@ export {
   CreateWebWorkerMLCEngine,
 } from "./web_worker";
 
-export { WorkerRequest, WorkerResponse, CustomRequestParams } from "./message";
+export type {
+  WorkerRequest,
+  WorkerResponse,
+  CustomRequestParams,
+} from "./message";
 
 export {
   ServiceWorkerMLCEngineHandler,
