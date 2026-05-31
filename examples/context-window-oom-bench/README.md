@@ -19,11 +19,29 @@ Inference_ project: it quantifies the wall and gives an early read on whether
 
 ## Run
 
+> **Build the local instrumented package first.** This example reads
+> `engine.getKVCacheMetrics()`, which only exists in this branch's source — it
+> is **not** in the published npm package. You must build the root package and
+> point the example at it, or the VRAM columns (`numPages`, `kvCacheMB`,
+> `estPeakVRAMMB`, …) will come out **blank**.
+
 ```bash
+# 1. From the repo root: build the instrumented web-llm package into ./lib
+cd /path/to/web-llm
+npm install
+npm run build
+
+# 2. Run the benchmark example (it resolves @mlc-ai/web-llm to ../../lib)
 cd examples/context-window-oom-bench
 npm install
 npm start          # serves on http://localhost:8888
 ```
+
+If you change `src/` in the root again, re-run `npm run build` (root) and
+restart `npm start`. A quick check that instrumentation is live: the first
+result row should have non-empty `kvCacheMB` / `estPeakVRAMMB`, and the console
+should show `PagedKVCache allocation: ...` / `PagedKVCache memory estimate: ...`
+lines at model load.
 
 Open the page in Chrome and **open the console**. You'll see:
 
@@ -156,15 +174,21 @@ Device: \_\_\_\_ (e.g. MacBook Air M4, 16 GB) · Browser: \_\_\_\_ ·
 
 ### Llama-3.2-3B-Instruct-q4f16_1-MLC
 
-| ctx   | peak VRAM (est, MB) | finish_reason | peak KV len | decode tok/s | outcome |
-| ----- | ------------------- | ------------- | ----------- | ------------ | ------- |
-| 2048  |                     |               |             |              |         |
-| 4096  |                     |               |             |              |         |
-| 8192  |                     |               |             |              |         |
-| 16384 |                     |               |             |              |         |
-| 32768 |                     |               |             |              |         |
+Run 1 (MacBook Air M4). VRAM columns blank because this run used the published
+npm package without instrumentation — re-run against the local build (see Run
+section) to capture peak VRAM.
 
-OOM cliff (3B): \_\_\_\_
+| ctx   | peak VRAM (est, MB) | finish_reason | peak KV len | decode tok/s | outcome          |
+| ----- | ------------------- | ------------- | ----------- | ------------ | ---------------- |
+| 2048  | _(rerun w/ build)_  | stop          | 1475        | 21.6         | PASS             |
+| 4096  | _(rerun w/ build)_  | stop          | 2891        | 15.1         | PASS             |
+| 8192  | _(rerun w/ build)_  | stop          | 5675        | 10.7         | PASS             |
+| 16384 | _(rerun w/ build)_  | —             | —           | —            | OOM (hard crash) |
+| 32768 | —                   | —             | —           | —            | not reached      |
+
+OOM cliff (3B): **16384** — crashed the machine at `context_window_size=16384`;
+largest stable window **8192**. Note decode throughput already degrades sharply
+with context (21.6 → 10.7 tok/s from 2K → 8K).
 
 ### Qwen2.5-7B-Instruct-q4f16_1-MLC
 
