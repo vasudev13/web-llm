@@ -27,9 +27,25 @@ interface ModelSpec {
 // to run a fast subset -- one small model and two small context windows --
 // for a quick "does this work?" check (~1 min) instead of the full sweep
 // (both models, up to 32K, many minutes). No code editing required.
-const SMOKE =
-  typeof location !== "undefined" &&
-  new URLSearchParams(location.search).has("smoke");
+const params =
+  typeof location !== "undefined"
+    ? new URLSearchParams(location.search)
+    : new URLSearchParams();
+const SMOKE = params.has("smoke");
+
+// Fast cliff-finder: append `?fast` to the URL. Uses tiny max_tokens so each
+// run is seconds, not minutes -- the OOM cliff is hit at allocation/prefill
+// time, NOT during long decode, so we don't need to generate hundreds of
+// tokens to trigger it. This makes it safe and cheap to probe higher context
+// sizes and pin the exact cliff for both 3B and 7B. Combine with `?ctx=` to
+// override the sweep, e.g. `?fast&ctx=11264,12288,16384`.
+const FAST = params.has("fast");
+
+// Optional explicit context list, e.g. `?ctx=4096,8192,11264`.
+const CTX_OVERRIDE = (params.get("ctx") ?? "")
+  .split(",")
+  .map((s) => parseInt(s.trim(), 10))
+  .filter((n) => Number.isFinite(n) && n > 0);
 
 const ALL_MODELS: ModelSpec[] = [
   {
@@ -53,8 +69,21 @@ const MODELS: ModelSpec[] = SMOKE ? [ALL_MODELS[0]] : ALL_MODELS;
 // default stays at/under 10240 to probe that gap without rebooting your Mac.
 // Raise these only if you have headroom and accept the crash risk -- the
 // crash-recovery logic will still record the size that dies. Smoke mode uses
-// just two small windows for speed.
-const CONTEXT_SIZES = SMOKE ? [2048, 4096] : [2048, 4096, 8192, 10240];
+// just two small windows for speed. `?ctx=` overrides this list; `?fast` adds
+// the historical 4K cap + the known cliff-bracket probes.
+const CONTEXT_SIZES =
+  CTX_OVERRIDE.length > 0
+    ? CTX_OVERRIDE
+    : SMOKE
+      ? [2048, 4096]
+      : FAST
+        ? [2048, 4096, 8192, 10240, 11264, 12288, 16384]
+        : [2048, 4096, 8192, 10240];
+
+// max_tokens per request. In FAST mode we only need enough decode to confirm
+// the run survives prefill/allocation (the cliff is at allocation time), so a
+// handful of tokens keeps each run to seconds.
+const MAX_TOKENS = FAST ? 8 : undefined; // undefined => fill toward the window
 
 // Fraction of the window filled by the prompt; the remainder is generated so
 // decode reaches the cap quickly while still stressing KV memory.
@@ -88,11 +117,48 @@ interface RunResult {
   maxStorageBufferMB?: number;
   bufferLimitHeadroomPct?: number; // largestKVBuffer / maxStorageBuffer * 100
   exceedsBufferLimit?: boolean;
+  // Real browser memory after load+generate, if the API is available (Chrome,
+  // cross-origin-isolated only). Validates the estimated peak VRAM.
+  measuredMemMB?: number;
   error?: string;
 }
 
 // Device WebGPU limit, queried once and reused for every run.
 let maxStorageBufferBytes: number | undefined;
+
+// Whether we've already warned that the memory-measurement API is unavailable.
+let warnedNoMemAPI = false;
+
+/**
+ * Best-effort real memory reading via `performance.measureUserAgentSpecificMemory()`
+ * (Chrome only, requires the page to be cross-origin isolated). Returns total
+ * bytes as MB, or undefined if unavailable. Note: this measures JS/renderer
+ * memory and may not capture all GPU allocations, but it is a real observed
+ * number to sanity-check the estimated peak VRAM against.
+ */
+async function measureMemoryMB(): Promise<number | undefined> {
+  const perf = performance as unknown as {
+    measureUserAgentSpecificMemory?: () => Promise<{ bytes: number }>;
+  };
+  if (typeof perf.measureUserAgentSpecificMemory !== "function") {
+    if (!warnedNoMemAPI) {
+      warnedNoMemAPI = true;
+      console.warn(
+        "[oom-bench] performance.measureUserAgentSpecificMemory() unavailable " +
+          "(needs Chrome + cross-origin isolation). Skipping real memory probe; " +
+          "estimated peak VRAM is still reported.",
+      );
+    }
+    return undefined;
+  }
+  try {
+    const sample = await perf.measureUserAgentSpecificMemory();
+    return sample.bytes / 1024 / 1024;
+  } catch (err) {
+    console.warn("[oom-bench] measureUserAgentSpecificMemory failed:", err);
+    return undefined;
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -334,7 +400,9 @@ async function runOne(spec: ModelSpec, ctx: number): Promise<RunResult> {
     const reply = await engine!.chat.completions.create({
       messages: [{ role: "user", content: prompt }],
       temperature: 0,
-      max_tokens: ctx, // large enough that only the context cap should stop us
+      // In FAST mode, a handful of tokens is enough -- the OOM cliff is hit at
+      // allocation/prefill time, not during decode. Otherwise fill the window.
+      max_tokens: MAX_TOKENS ?? ctx,
     });
     const choice = reply.choices[0];
     const usage = reply.usage;
@@ -353,7 +421,10 @@ async function runOne(spec: ModelSpec, ctx: number): Promise<RunResult> {
     result.prefillTokPerSec = extra?.prefill_tokens_per_s;
     result.decodeTokPerSec = extra?.decode_tokens_per_s;
     result.e2eLatencyS = extra?.e2e_latency_s;
-    result.outcome = result.finishReason === "length" ? "CONTEXT_CAP" : "PASS";
+    // In FAST mode the run is capped early, so "length" is expected and not a
+    // context-cap finding; only treat it as CONTEXT_CAP in normal mode.
+    result.outcome =
+      !MAX_TOKENS && result.finishReason === "length" ? "CONTEXT_CAP" : "PASS";
   } catch (err) {
     const c = classifyError(err);
     result.outcome = c.outcome;
@@ -362,6 +433,12 @@ async function runOne(spec: ModelSpec, ctx: number): Promise<RunResult> {
       engine = undefined;
     }
   }
+
+  // 4. Real browser memory probe (validates the estimated peak VRAM). Only
+  // available in Chrome when the page is cross-origin isolated; otherwise
+  // silently skipped.
+  const measuredMemMB = await measureMemoryMB();
+  if (measuredMemMB !== undefined) result.measuredMemMB = measuredMemMB;
 
   return result;
 }
@@ -395,6 +472,7 @@ function toCSV(rows: RunResult[]): string {
     "maxStorageBufferMB",
     "bufferLimitHeadroomPct",
     "exceedsBufferLimit",
+    "measuredMemMB",
     "error",
   ];
   const lines = rows.map((r) =>
@@ -420,6 +498,7 @@ function toCSV(rows: RunResult[]): string {
       fmt(r.maxStorageBufferMB),
       fmt(r.bufferLimitHeadroomPct, 1),
       r.exceedsBufferLimit ?? "",
+      fmt(r.measuredMemMB),
       (r.error ?? "").replace(/[\r\n,]+/g, " "),
     ].join(","),
   );
@@ -438,6 +517,7 @@ function renderTable(rows: RunResult[]) {
     ["estPeakVRAM(MB)", (r) => fmt(r.estPeakVRAMMB)],
     ["maxKVbuf(MB)", (r) => fmt(r.largestKVBufferMB)],
     ["bufLimit%", (r) => fmt(r.bufferLimitHeadroomPct, 1)],
+    ["measMem(MB)", (r) => fmt(r.measuredMemMB)],
     ["decode tok/s", (r) => fmt(r.decodeTokPerSec, 1)],
   ];
   const thead = "<tr>" + cols.map(([h]) => `<th>${h}</th>`).join("") + "</tr>";
@@ -553,10 +633,11 @@ async function main() {
   // crash resumes the sweep instead of repeating it.
   const done = new Set(results.map((r) => `${r.model}@${r.contextSize}`));
 
+  const mode = SMOKE ? "SMOKE" : FAST ? "FAST" : "FULL";
   setStatus(
-    `${SMOKE ? "SMOKE" : "FULL"} sweep: ${MODELS.length} model(s) x ` +
-      `${CONTEXT_SIZES.length} context size(s)` +
-      `${SMOKE ? " (append/remove ?smoke in the URL to switch)" : ""}`,
+    `${mode} sweep: ${MODELS.length} model(s) x ` +
+      `${CONTEXT_SIZES.length} context size(s) [${CONTEXT_SIZES.join(", ")}]` +
+      `${FAST ? ` (max_tokens=${MAX_TOKENS}, cliff-finder)` : ""}`,
   );
   for (const spec of MODELS) {
     for (const ctx of CONTEXT_SIZES) {

@@ -63,17 +63,25 @@ Open the page in Chrome and **open the console**. You'll see:
 - A live HTML results table, and on completion a `console.table`, an **OOM cliff
   summary**, and **CSV** + **JSON** dumps you can paste into the template below.
 
-### Smoke mode (fast check, no code editing)
+### URL modes (no code editing)
 
-For a quick "does this work?" run (~1 min) instead of the full sweep, append
-`?smoke` to the URL:
+| URL                             | What it does                                                            |
+| ------------------------------- | ----------------------------------------------------------------------- |
+| `http://localhost:8888`         | **Full sweep** — both models, `[2048, 4096, 8192, 10240]` (minutes).    |
+| `…/?smoke`                      | **Smoke** — 3B only, `[2048, 4096]` (~1 min sanity check).              |
+| `…/?fast`                       | **Fast cliff-finder** — `max_tokens=8`, sweeps up through 16384.        |
+| `…/?ctx=11264,12288`            | **Explicit context list** — probe exactly these sizes.                  |
+| `…/?fast&ctx=11264,12288,16384` | Fast mode over a custom list — the safe way to pin the exact OOM cliff. |
 
-- `http://localhost:8888` → **full sweep**: both models, context sizes up to
-  10240 by default (many minutes).
-- `http://localhost:8888/?smoke` → **smoke mode**: just the 3B model and
-  `[2048, 4096]`.
+**Why `?fast` is safe for probing high context:** the OOM cliff is hit at
+KV-cache **allocation / prefill** time, not during long decode. So you don't
+need to generate hundreds of tokens to trigger it — `max_tokens=8` makes each
+run finish in seconds while still reproducing the crash. This lets you pin the
+exact cliff (e.g. binary-search 11264) and find **7B's** cliff (which the slow
+default sweep never reached) without multi-minute runs.
 
-The active mode is printed to the console and the status line at startup.
+The active mode and the context list are printed to the console and status line
+at startup.
 
 ### Other config
 
@@ -131,6 +139,9 @@ tensor, which scales with context). Columns:
 - `maxStorageBufferMB` — the device's per-buffer cap.
 - `bufferLimitHeadroomPct` — `largestKVBuffer / maxStorageBuffer * 100`.
 - `exceedsBufferLimit` — `true` if a single buffer is over the cap.
+- `measuredMemMB` — **real** observed memory via
+  `performance.measureUserAgentSpecificMemory()` (Chrome + cross-origin
+  isolation only; blank otherwise), to validate the _estimated_ peak VRAM.
 
 If a crash occurs while estimated peak VRAM is far below physical memory but
 `bufferLimitHeadroomPct` is near/over 100%, the OOM cliff is a **per-buffer
@@ -248,6 +259,22 @@ machine thrashing/sleeping under sustained load.)
   ceiling today is **~10K context**. This is the baseline KV-cache eviction
   needs to beat, and the crash mechanism (cumulative allocation, not a single
   oversized buffer) is exactly what paged eviction addresses.
-  OOM cliff (7B): \_\_\_\_
 
-**7B @ 16K viable?** \_\_\_\_ · **3B pivot needed?** \_\_\_\_
+### Open items / remaining tests
+
+These refine the findings above; run them with the fast cliff-finder so they
+are cheap and crash-safe (`?fast`, `max_tokens=8`):
+
+1. **7B OOM cliff not yet found.** 7B was only swept to 10240 (no OOM); its
+   actual memory cliff is unknown. Run `?fast&ctx=12288,16384,24576,32768` for
+   7B to find it. (7B is already perf-unusable by 10K, but the issue explicitly
+   asks for the cliff of _both_ models.)
+2. **Exact 3B cliff.** Currently bracketed 10240–12288. Run
+   `?fast&ctx=11264,11776` to pin it.
+3. **Validate estimated VRAM against real memory.** All peak-VRAM figures are
+   _computed_. The new `measuredMemMB` column captures real memory when Chrome
+   is cross-origin isolated; confirm the estimates track the observed numbers,
+   which underpins the "crash is not total-memory exhaustion" conclusion.
+4. **Explicit 4K-cap repro (issue #752).** Confirm a clean
+   `finish_reason="length"` at exactly `context_window_size=4096` in normal
+   (non-fast) mode — the canonical "4K context cap" reproduction.
