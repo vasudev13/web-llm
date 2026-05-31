@@ -13,6 +13,14 @@
     <h3>Status</h3>
     <label id="status-label"> </label>
     <h3>Results</h3>
+    <p>
+      Results are saved automatically as each run finishes, so an OOM crash
+      won't lose them. Use these buttons to export (or reload the page after a
+      crash to recover &mdash; the sweep resumes where it left off):
+    </p>
+    <button id="download-csv">Download CSV</button>
+    <button id="download-json">Download JSON</button>
+    <button id="clear-results">Clear saved results</button>
     <div id="results-table"></div>
 
     <script type="module" src="./context_window_oom_bench.ts"></script>

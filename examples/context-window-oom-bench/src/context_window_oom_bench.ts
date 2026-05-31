@@ -97,6 +97,101 @@ function setStatus(text: string) {
   setLabel("status-label", text);
 }
 
+// ---------------------------------------------------------------------------
+// Crash-proof persistence. A high-context OOM can take the whole tab down,
+// taking the console logs with it. We persist each result to localStorage the
+// moment it completes (written to disk per-origin, survives a tab crash) and
+// restore + display them on reload, so a crash never erases what already ran.
+// ---------------------------------------------------------------------------
+const STORAGE_KEY = "oom-bench-results";
+// Marker for the run currently in flight. If a hard tab crash (a high-context
+// OOM can kill the whole tab, not just throw) prevents the run from recording a
+// result, this marker is still on disk on reload -- that pinpoints the context
+// size that crashed, which IS the OOM cliff.
+const PENDING_KEY = "oom-bench-pending";
+
+function loadSavedResults(): RunResult[] {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEY);
+    return raw ? (JSON.parse(raw) as RunResult[]) : [];
+  } catch {
+    return [];
+  }
+}
+
+function setPending(spec: ModelSpec, ctx: number) {
+  try {
+    localStorage.setItem(
+      PENDING_KEY,
+      JSON.stringify({
+        model: spec.label,
+        sizeClass: spec.sizeClass,
+        contextSize: ctx,
+      }),
+    );
+  } catch {
+    /* ignore */
+  }
+}
+
+function clearPending() {
+  try {
+    localStorage.removeItem(PENDING_KEY);
+  } catch {
+    /* ignore */
+  }
+}
+
+/** A leftover pending marker means the previous run hard-crashed the tab. */
+function takeCrashedPending(): RunResult | undefined {
+  try {
+    const raw = localStorage.getItem(PENDING_KEY);
+    if (!raw) return undefined;
+    localStorage.removeItem(PENDING_KEY);
+    const p = JSON.parse(raw) as {
+      model: string;
+      sizeClass: string;
+      contextSize: number;
+    };
+    return {
+      model: p.model,
+      sizeClass: p.sizeClass,
+      contextSize: p.contextSize,
+      outcome: "OOM_DEVICE_LOST",
+      error: "Tab crashed during this run (recovered on reload) -- OOM cliff.",
+    };
+  } catch {
+    return undefined;
+  }
+}
+
+function saveResults(rows: RunResult[]) {
+  try {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(rows));
+  } catch (e) {
+    console.warn("[oom-bench] could not persist results:", e);
+  }
+}
+
+function clearSavedResults() {
+  try {
+    localStorage.removeItem(STORAGE_KEY);
+  } catch {
+    /* ignore */
+  }
+}
+
+/** Trigger a browser download of `contents` as a file named `filename`. */
+function downloadFile(filename: string, contents: string, mime: string) {
+  const blob = new Blob([contents], { type: mime });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
 /** Build a prompt of roughly `approxTokens` tokens (~4 chars/token heuristic). */
 function buildFillerPrompt(approxTokens: number): string {
   const base =
@@ -309,6 +404,28 @@ function renderTable(rows: RunResult[]) {
   }
 }
 
+/** Wire up the Download CSV / Download JSON / Clear buttons. */
+function setupButtons(getRows: () => RunResult[]) {
+  const bind = (id: string, fn: () => void) => {
+    const el = document.getElementById(id);
+    if (el) el.addEventListener("click", fn);
+  };
+  bind("download-csv", () =>
+    downloadFile("oom-bench-results.csv", toCSV(getRows()), "text/csv"),
+  );
+  bind("download-json", () =>
+    downloadFile(
+      "oom-bench-results.json",
+      JSON.stringify(getRows(), null, 2),
+      "application/json",
+    ),
+  );
+  bind("clear-results", () => {
+    clearSavedResults();
+    location.reload();
+  });
+}
+
 function summarizeCliff(rows: RunResult[]) {
   console.log("\n===== OOM cliff summary =====");
   for (const spec of MODELS) {
@@ -334,16 +451,54 @@ function summarizeCliff(rows: RunResult[]) {
 // Main
 // ---------------------------------------------------------------------------
 async function main() {
+  // Restore any results from a previous (possibly crashed) run so they are
+  // never lost, and keep them downloadable via the buttons at all times.
+  const results: RunResult[] = loadSavedResults();
+  // If the previous run hard-crashed the tab/machine, recover that context size
+  // as the OOM cliff so the sweep doesn't just retry and crash again.
+  const crashed = takeCrashedPending();
+  if (
+    crashed &&
+    !results.some(
+      (r) => r.contextSize === crashed.contextSize && r.model === crashed.model,
+    )
+  ) {
+    results.push(crashed);
+    saveResults(results);
+    console.warn(
+      `[oom-bench] recovered a hard crash at ${crashed.model}@${crashed.contextSize} ` +
+        "-- recording it as OOM_DEVICE_LOST (likely the cliff).",
+    );
+  }
+  setupButtons(() => results);
+  if (results.length > 0) {
+    console.log(
+      `[oom-bench] restored ${results.length} result(s) from a previous run. ` +
+        "Use the Download buttons to export, or Clear to start fresh.",
+    );
+    renderTable(results);
+  }
+
+  // Skip (model, ctx) pairs we already have a result for, so reloading after a
+  // crash resumes the sweep instead of repeating it.
+  const done = new Set(results.map((r) => `${r.model}@${r.contextSize}`));
+
   setStatus(
     `${SMOKE ? "SMOKE" : "FULL"} sweep: ${MODELS.length} model(s) x ` +
       `${CONTEXT_SIZES.length} context size(s)` +
       `${SMOKE ? " (append/remove ?smoke in the URL to switch)" : ""}`,
   );
-  const results: RunResult[] = [];
   for (const spec of MODELS) {
     for (const ctx of CONTEXT_SIZES) {
+      if (done.has(`${spec.label}@${ctx}`)) {
+        console.log(`[oom-bench] skipping already-done ${spec.label}@${ctx}`);
+        continue;
+      }
+      setPending(spec, ctx); // mark in-flight; recovered if the tab/OS crashes
       const result = await runOne(spec, ctx);
+      clearPending();
       results.push(result);
+      saveResults(results); // persist immediately -- survives a tab/OS crash
       console.log("[oom-bench] result:", result);
       renderTable(results);
     }
@@ -356,7 +511,10 @@ async function main() {
     engine = undefined;
   }
 
-  setStatus("Sweep complete. See console for CSV / JSON.");
+  setStatus(
+    "Sweep complete. Use the Download buttons above, or copy the CSV / JSON " +
+      "from the console.",
+  );
   console.table(results);
   summarizeCliff(results);
   console.log("\n===== CSV =====\n" + toCSV(results));

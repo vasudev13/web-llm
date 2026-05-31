@@ -62,6 +62,27 @@ Edit the config block at the top of `src/context_window_oom_bench.ts`:
 > can take **minutes** per run. Trim `CONTEXT_SIZES` (or use `?smoke`) while
 > iterating.
 
+## Crash recovery (important for the OOM cliff)
+
+A high-context run can be violent enough to crash the browser tab — or even
+hang/restart the whole machine — which takes the console logs with it. To make
+results survivable:
+
+- **Each result is saved to `localStorage` the instant it finishes.** This is
+  on-disk, per-origin storage that survives a tab crash _and_ an OS reboot.
+- **Reloading the page recovers everything and resumes** the sweep where it left
+  off (already-done `(model, context)` pairs are skipped, not repeated).
+- **The run currently in flight is marked before it starts.** If that run hard-
+  crashes the tab/machine (so it never records a result), reloading detects the
+  leftover marker and records that context size as `OOM_DEVICE_LOST` — which
+  pinpoints the OOM cliff — then skips it so you don't crash on the same size
+  again.
+- **Download CSV / Download JSON** buttons export whatever has been collected so
+  far, at any time. **Clear saved results** wipes the saved state to start fresh.
+
+So if it dies: just **reopen `http://localhost:8888`**, click **Download JSON**,
+and you have your data — including the size that killed it.
+
 ## What each run records
 
 `finish_reason`, `prompt_tokens`, `completion_tokens`, peak KV length
