@@ -760,10 +760,11 @@ async function runCoverage(
   for (const spec of ALL_MODELS) {
     // Phase 1: explicit 4K cap repro (full decode).
     setStatus(`COVERAGE ${spec.label}: Phase 1 -- 4K context-cap repro`);
-    // Overfill the window (prompt > ctx) so generation genuinely hits the cap
-    // and returns finish_reason="length" / CONTEXT_CAP, rather than answering
-    // briefly and stopping. fillFraction 1.2 puts the prompt past 4096.
-    await runAndRecord(spec, 4096, { phase: "cap-4k", fillFraction: 1.2 });
+    // Overfill the window so the prompt ALONE exceeds it, guaranteeing the cap
+    // fires (finish_reason="length" / CONTEXT_CAP) regardless of whether the
+    // model would otherwise emit a stop token first. The filler-prompt token
+    // estimate under-produces by ~20%, so 1.6x reliably clears 4096.
+    await runAndRecord(spec, 4096, { phase: "cap-4k", fillFraction: 1.6 });
 
     // Phase 2: VRAM + perf curve at safe sizes (full decode).
     for (const ctx of COVERAGE_CURVE) {

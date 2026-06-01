@@ -232,81 +232,85 @@ Device: **MacBook Air M4, 16 GB unified memory** · Browser: **Chrome (WebGPU)**
 > `?coverage` run produced three phases per model: `cap-4k`, `vram-perf` (full
 > decode), and `cliff` (fast, `max_tokens=8`).
 
-### Headline: the crash is a _sustained-decode_ failure, not a KV-allocation cliff
+### Headline: there is no KV-allocation OOM cliff; the wall is sustained decode
 
-The fast `cliff` phase **allocates and prefills the full context window** (e.g.
-65536 → 4096 pages, ~44.6K prompt tokens) but only decodes a handful of tokens.
-Result: **no OOM at any size**, for either model:
+The fast `cliff` phase **allocates and prefills the full context window** (at
+32768: 2048 pages, ~22.4K prompt tokens) but decodes only ~7 tokens. Result:
+**no OOM at any size, for either model, all the way to 32768** — every `cliff`
+row is `PASS` with `finish_reason="length"`:
 
-- **3B** ran clean through **65536** (est. peak ~8.9 GB, 128 MB largest buffer).
-- **7B** ran clean through **49152** (est. peak ~8.0 GB); only **65536** failed,
-  and with `"A valid external Instance reference no longer exists"` (engine
-  teardown after the prior heavy run) — not a clean device-lost OOM.
+- **3B**: clean through **32768** (est. peak ~5.4 GB, largest buffer 64 MB).
+- **7B**: clean through **32768** (est. peak ~7.1 GB, largest buffer 32 MB).
+- `exceedsBufferLimit: false` at every size (largest KV buffer ≤ 64 MB vs the
+  1024 MB cap) — **the per-buffer limit is never the constraint.**
 
-This **overturns the earlier conclusion.** The hard machine crashes we saw
-before happened only in **full-decode** runs at 12288/16384 — i.e. generating
-thousands of tokens over many minutes. Since static allocation + prefill of a
-_much larger_ context (65536) does **not** crash, the failure is tied to
-**sustained decode duration / load**, not KV-cache size. The earlier
-"OOM cliff at ~12K" and "cumulative allocation" diagnoses were **wrong** — the
-likely real cause is prolonged 100% GPU load (thermal / OS watchdog / a
-per-step growth over a long run), consistent with the multi-hour `e2e` we once
-observed.
+This **overturns the earlier "OOM cliff at ~12K" conclusion.** The hard machine
+crashes seen earlier happened only in **full-decode** runs (thousands of tokens
+over many minutes). Since static allocation + prefill of a _much larger_ context
+(32K) does not crash, the failure is tied to **sustained decode duration /
+load**, not KV-cache size — likely prolonged ~100% GPU load (thermal / OS
+watchdog), consistent with the multi-hour `e2e` once observed. The earlier
+"cumulative-allocation cliff" diagnosis was **wrong**.
 
-> ⚠️ Implication for methodology: the fast cliff-finder does **not** reproduce
-> this crash, because the crash needs long decode. It is still the right tool
-> for an _allocation_ cliff (and proves there isn't one up to 64K), but the
-> sustained-decode failure must be characterised with full-decode runs.
+> ⚠️ Methodology note: the fast cliff-finder cannot reproduce this crash (the
+> crash needs long decode). It is the right tool for an _allocation_ cliff — and
+> proves there isn't one up to 32K — but the sustained-decode failure must be
+> characterised with full-decode runs.
 
-### `cliff` phase — allocation/prefill only (`max_tokens=8`), all PASS
+### `cliff` phase — allocation + prefill only (`max_tokens≈7`), all PASS
 
-| ctx   | 3B est VRAM (MB) | 3B decode tok/s | 7B est VRAM (MB) | 7B decode tok/s |
-| ----- | ---------------- | --------------- | ---------------- | --------------- |
-| 8192  | 2669             | 10.8            | 5774             | 5.8             |
-| 12288 | 3117             | 8.2             | 5998             | 4.4             |
-| 16384 | 3565             | 6.5             | 6222             | 3.5             |
-| 24576 | 4461             | 4.7             | 6670             | —               |
-| 32768 | 5357             | 3.6             | 7118             | 2.0             |
-| 49152 | 7149             | 2.5             | 8014             | 1.4             |
-| 65536 | 8941             | 1.9             | (teardown error) | —               |
+| ctx   | 3B est VRAM (MB) | 3B decode tok/s | 7B est VRAM (MB) | 7B decode tok/s | exceedsBufferLimit |
+| ----- | ---------------- | --------------- | ---------------- | --------------- | ------------------ |
+| 8192  | 2669             | 10.9            | 5774             | 5.5             | false              |
+| 12288 | 3117             | 8.2             | 5998             | 4.3             | false              |
+| 16384 | 3565             | 6.6             | 6222             | 3.5             | false              |
+| 24576 | 4461             | 4.7             | 6670             | 2.6             | false              |
+| 32768 | 5357             | 3.6             | 7118             | 2.0             | false              |
 
-Every `largestKVBufferMB` stayed ≤ 128 MB vs the 1024 MB cap (`exceedsBufferLimit:
-false` throughout) — **the per-buffer limit is never the constraint.**
+(3B and 7B also passed the intermediate 10240/11264/14336/20480 rungs — omitted
+for brevity; full data in the JSON.)
 
 ### `vram-perf` phase — full decode (the usable-throughput picture)
 
 | ctx   | 3B decode tok/s | 3B e2e (s) | 7B decode tok/s | 7B e2e (s) |
 | ----- | --------------- | ---------- | --------------- | ---------- |
-| 2048  | 21.9            | 7.5        | 9.5             | 66         |
-| 4096  | 16.1            | 16.2       | 7.9             | 116        |
-| 8192  | 11.0            | 38.2       | 5.7             | 185        |
-| 10240 | 9.4             | 52.7       | 5.0             | 206        |
+| 2048  | 22.1            | 7.5        | 9.7\*           | 77\*       |
+| 4096  | 16.4            | 16.0       | 7.5             | 126        |
+| 8192  | 11.0            | 38.2       | 5.7             | 189        |
+| 10240 | 9.4             | 52.6       | 4.9             | 243        |
 
-### `cap-4k` phase — ⚠️ did not reproduce the cap
+\* 7B@2048 hit the window (`CONTEXT_CAP`, 601 completion tokens) rather than
+stopping — it is a verbose model.
 
-Both models returned `finish_reason="stop"` at ctx=4096 (the model answered in
-~600 tokens and stopped naturally, never reaching the window). This phase has
-been **fixed** to overfill the prompt past the window (`fillFraction 1.2`) so the
-next `?coverage` run yields a true `CONTEXT_CAP` / `finish_reason="length"`.
+### `cap-4k` phase — 4K context-cap reproduction (issue #752)
 
-### Verdict (revised)
+- **7B: reproduced cleanly** — `finish_reason="length"`, `CONTEXT_CAP`, peak KV
+  length exactly **4096** at `context_window_size=4096`. ✅
+- **3B: narrowly missed** — the prompt landed at 3996 tokens and the model
+  emitted a stop token at 4023, just under the window. The filler-prompt token
+  estimate under-produces by ~20%, so `fillFraction 1.2` wasn't enough for 3B.
+  **Fixed**: `cap-4k` now uses `fillFraction 1.6`, overflowing the window so the
+  prompt alone exceeds 4096 — the next `?coverage` run reproduces the cap for
+  _both_ models.
 
-- **Allocation is not the wall.** Both models allocate + prefill far past 16K
-  (3B to 64K, 7B to 48K) with peak VRAM ≤ ~9 GB and KV buffers ≪ the 1 GB cap.
-  So 7B@16K is **memory-feasible** — confirmed, not just estimated.
-- **Sustained decode is the wall.** Long generations are what destabilised the
-  machine earlier; throughput also makes long context impractical (3B ~9 tok/s
-  at 10K, 7B ~5 tok/s; both fall to 1–3 tok/s by 32–64K).
-- **7B remains impractical for interactive use** (≤5 tok/s by 8–10K) → **3B
-  pivot stands** on usability grounds, even though the memory cliff we first
-  reported doesn't exist as such.
-- **For KV-cache eviction**, the takeaway shifts: the win is **decode-time
-  efficiency / stability over long generations**, not dodging an allocation OOM
-  at ~12K.
+### Verdict
 
-### Remaining to finalise
+- **Allocation is not the wall.** Both models allocate + prefill to **32K** with
+  peak VRAM ≤ ~7 GB and KV buffers ≪ the 1 GB cap. **7B@16K is memory-feasible —
+  confirmed empirically**, not just estimated.
+- **Sustained decode is the wall.** Long generations destabilised the machine
+  earlier; throughput also makes long context impractical (3B ~9 tok/s at 10K,
+  7B ~5 tok/s; both fall to ~2–3 tok/s by 32K).
+- **7B is impractical for interactive use** (≤5 tok/s by 8–10K, 2–4 min/request)
+  → **the 3B pivot stands on usability grounds**, though the memory cliff we
+  first reported does not exist.
+- **For KV-cache eviction**, the win here is **decode-time efficiency /
+  stability over long generations**, not avoiding an allocation OOM at ~12K.
 
-1. **Re-run `?coverage`** to get a true `cap-4k` reproduction (fix landed) and
-   `measuredMemMB` (was unavailable — needs Chrome cross-origin isolation).
-2. **Characterise the sustained-decode crash** deliberately: a full-decode run
-   at 12288/16384 with logging, to confirm it's load/thermal vs. a memory leak.
+### Open caveat
+
+`measuredMemMB` is still blank — `performance.measureUserAgentSpecificMemory()`
+needs the page to be cross-origin isolated (COOP/COEP headers), which the dev
+server doesn't set. Peak VRAM therefore remains **estimated** (the estimates
+scale exactly with context and match the page/buffer geometry, but are not
+independently confirmed against observed memory).
