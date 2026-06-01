@@ -252,6 +252,18 @@ load**, not KV-cache size — likely prolonged ~100% GPU load (thermal / OS
 watchdog), consistent with the multi-hour `e2e` once observed. The earlier
 "cumulative-allocation cliff" diagnosis was **wrong**.
 
+> **Reproducibility caveat (run-to-run).** A later `?coverage` run, which ran
+> 3B's full ladder to 32K _before_ 7B, saw 7B's `cliff` phase degrade after
+> 8192 with engine-state errors — `"A valid external Instance reference no
+longer exists"`, then `"Tokenizer instance already deleted"` — and a tab
+> crash at 12288. These are **harness lifecycle artifacts from accumulated
+> reload cycles, not a KV-allocation OOM**: the clean run (7B first) passed the
+> same sizes to 32768. We therefore do **not** record a 7B cliff at 12288. The
+> harness now recreates a fresh engine and retries once on such errors
+> (`cliff-retry` phase) so they don't masquerade as an OOM. Takeaway: there is
+> no allocation cliff up to 32K; engine state, not context size, was the
+> variable.
+
 > ⚠️ Methodology note: the fast cliff-finder cannot reproduce this crash (the
 > crash needs long decode). It is the right tool for an _allocation_ cliff — and
 > proves there isn't one up to 32K — but the sustained-decode failure must be

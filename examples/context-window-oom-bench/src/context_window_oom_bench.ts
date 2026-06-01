@@ -328,6 +328,21 @@ function classifyError(err: unknown): { outcome: Outcome; msg: string } {
   return { outcome: "OTHER_ERROR", msg };
 }
 
+/**
+ * Engine-state-corruption errors that accumulate across many reload cycles
+ * (e.g. "A valid external Instance reference no longer exists", "Tokenizer
+ * instance already deleted"). These are HARNESS lifecycle artifacts, NOT model
+ * memory limits -- a fresh engine clears them. Detecting them lets us recreate
+ * the engine and retry rather than mis-attributing a downstream crash to an OOM
+ * cliff at that context size.
+ */
+function isEngineStateError(err?: string): boolean {
+  if (!err) return false;
+  return /external Instance reference no longer exists|Tokenizer instance already deleted|instance (is )?(already )?(deleted|disposed)|no longer exists/i.test(
+    err,
+  );
+}
+
 function fillMetrics(r: RunResult, m: KVCacheMetrics) {
   const toMB = (b: number) => b / 1024 / 1024;
   r.numPages = m.numPages;
@@ -772,10 +787,33 @@ async function runCoverage(
       await runAndRecord(spec, ctx, { phase: "vram-perf" });
     }
 
-    // Phase 3: fast cliff climb; stop this model at the first OOM.
+    // Phase 3: fast cliff climb; stop this model at the first real OOM.
     for (const ctx of COVERAGE_CLIFF_LADDER) {
       setStatus(`COVERAGE ${spec.label}: Phase 3 -- cliff probe @ ${ctx}`);
-      const r = await runAndRecord(spec, ctx, { maxTokens: 8, phase: "cliff" });
+      let r = await runAndRecord(spec, ctx, { maxTokens: 8, phase: "cliff" });
+
+      // Engine-state corruption (accumulated across many reloads) is a harness
+      // artifact, not an OOM. Recreate a fresh engine and retry this size once
+      // so we don't mis-attribute a downstream crash to a cliff here.
+      if (r?.outcome === "OTHER_ERROR" && isEngineStateError(r.error)) {
+        console.warn(
+          `[oom-bench] ${spec.label}@${ctx}: engine-state error ("${r.error}"); ` +
+            "recreating engine and retrying once (not an OOM).",
+        );
+        await freeEngine();
+        r = await runAndRecord(spec, ctx, {
+          maxTokens: 8,
+          phase: "cliff-retry",
+        });
+        if (r?.outcome === "OTHER_ERROR" && isEngineStateError(r.error)) {
+          console.warn(
+            `[oom-bench] ${spec.label}@${ctx}: engine-state error persists after ` +
+              "recreate; stopping this model's climb (NOT recording as OOM cliff).",
+          );
+          break;
+        }
+      }
+
       if (r?.outcome === "OOM_DEVICE_LOST") {
         console.log(
           `[oom-bench] ${spec.label}: OOM cliff found at ctx=${ctx}; ` +
