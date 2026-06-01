@@ -377,10 +377,11 @@ async function loadEngine(modelId: string, ctx: number): Promise<void> {
 async function runOne(
   spec: ModelSpec,
   ctx: number,
-  opts: { maxTokens?: number; phase?: string } = {},
+  opts: { maxTokens?: number; phase?: string; fillFraction?: number } = {},
 ): Promise<RunResult> {
   // Per-run max_tokens: explicit override (coverage) > FAST global > fill window.
   const maxTokens = opts.maxTokens ?? MAX_TOKENS;
+  const fillFraction = opts.fillFraction ?? PROMPT_FILL_FRACTION;
   const result: RunResult = {
     model: spec.label,
     sizeClass: spec.sizeClass,
@@ -426,7 +427,7 @@ async function runOne(
   // 3. Drive generation toward the cap.
   try {
     setStatus(`Generating ${spec.label} @ context_window_size=${ctx} ...`);
-    const prompt = buildFillerPrompt(Math.floor(ctx * PROMPT_FILL_FRACTION));
+    const prompt = buildFillerPrompt(Math.floor(ctx * fillFraction));
     const reply = await engine!.chat.completions.create({
       messages: [{ role: "user", content: prompt }],
       temperature: 0,
@@ -672,7 +673,7 @@ async function main() {
   const runAndRecord = async (
     spec: ModelSpec,
     ctx: number,
-    opts: { maxTokens?: number; phase?: string } = {},
+    opts: { maxTokens?: number; phase?: string; fillFraction?: number } = {},
   ): Promise<RunResult | undefined> => {
     if (
       done.has(
@@ -750,14 +751,17 @@ async function runCoverage(
   runAndRecord: (
     spec: ModelSpec,
     ctx: number,
-    opts?: { maxTokens?: number; phase?: string },
+    opts?: { maxTokens?: number; phase?: string; fillFraction?: number },
   ) => Promise<RunResult | undefined>,
   freeEngine: () => Promise<void>,
 ): Promise<void> {
   for (const spec of ALL_MODELS) {
     // Phase 1: explicit 4K cap repro (full decode).
     setStatus(`COVERAGE ${spec.label}: Phase 1 -- 4K context-cap repro`);
-    await runAndRecord(spec, 4096, { phase: "cap-4k" });
+    // Overfill the window (prompt > ctx) so generation genuinely hits the cap
+    // and returns finish_reason="length" / CONTEXT_CAP, rather than answering
+    // briefly and stopping. fillFraction 1.2 puts the prompt past 4096.
+    await runAndRecord(spec, 4096, { phase: "cap-4k", fillFraction: 1.2 });
 
     // Phase 2: VRAM + perf curve at safe sizes (full decode).
     for (const ctx of COVERAGE_CURVE) {
