@@ -263,6 +263,14 @@ longer exists"`, then `"Tokenizer instance already deleted"` — and a tab
 > (`cliff-retry` phase) so they don't masquerade as an OOM. Takeaway: there is
 > no allocation cliff up to 32K; engine state, not context size, was the
 > variable.
+>
+> **Definitive proof (same run).** In one `?coverage` run, 7B@12288 **crashed
+> the tab** (recovered as `OOM_DEVICE_LOST`) and then, on resume, 7B@12288
+> **PASSed** — followed by 14336 PASS, before engine-state errors returned and
+> 24576 crashed. A single context size cannot be both above and below a memory
+> cliff; 12288 passing immediately after it "crashed" confirms the failures are
+> **engine-state-dependent, not context-size-dependent**. (These runs predate
+> the `cliff-retry` fix, which now auto-recovers such errors mid-climb.)
 
 > ⚠️ Methodology note: the fast cliff-finder cannot reproduce this crash (the
 > crash needs long decode). It is the right tool for an _allocation_ cliff — and
