@@ -83,8 +83,10 @@ Open the page in Chrome and **open the console**. You'll see:
 2. **`vram-perf`** — VRAM + throughput curve over the known-safe sizes
    (`2048, 4096, 8192, 10240`), full decode.
 3. **`cliff`** — a fast (`max_tokens=8`) auto-escalating climb up
-   `8192 … 65536` that **stops each model at its first OOM**, so the OOM cliff
+   `8192 … 32768` that **stops each model at its first OOM**, so the OOM cliff
    is found for **both** 3B and 7B. Nothing past a model's cliff is attempted.
+   (A prior run showed no allocation OOM through this range — the real wall is
+   sustained decode, not allocation — so the ladder is capped at 32768.)
 
 Every run also records the real-memory probe (`measuredMemMB`), so the estimated
 peak VRAM is validated against observed memory. Combined with crash-recovery

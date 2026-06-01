@@ -60,10 +60,12 @@ const CTX_OVERRIDE = (params.get("ctx") ?? "")
 
 // Context ladder for the coverage cliff-finder (Phase 3). The climb stops per
 // model at the first OOM, so going high here is safe -- nothing past the cliff
-// actually runs for that model.
+// actually runs for that model. Capped at 32768: a prior run proved both models
+// allocate+prefill cleanly through this range with no OOM (the real wall is
+// sustained decode, not allocation), and 7B@65536 only hit an engine-teardown
+// error -- so climbing past 32K adds runtime/noise without new information.
 const COVERAGE_CLIFF_LADDER = [
-  8192, 10240, 11264, 12288, 14336, 16384, 20480, 24576, 32768, 40960, 49152,
-  65536,
+  8192, 10240, 11264, 12288, 14336, 16384, 20480, 24576, 32768,
 ];
 // Context sizes for the VRAM/perf curve (Phase 2) -- known-safe, full decode.
 const COVERAGE_CURVE = [2048, 4096, 8192, 10240];
