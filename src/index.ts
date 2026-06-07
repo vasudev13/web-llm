@@ -26,8 +26,12 @@ export {
   type EvictionConfig,
   type EvictionPolicy,
   NoOpEvictionPolicy,
+  StreamingLLMEvictionPolicy,
   DEFAULT_EVICTION_CONFIG,
+  DEFAULT_SINK_TOKENS,
   isNoOpEviction,
+  resolveBudgetTokens,
+  createEvictionPolicy,
 } from "./eviction_policy";
 
 export {

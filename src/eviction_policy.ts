@@ -119,16 +119,135 @@ export class NoOpEvictionPolicy implements EvictionPolicy {
   }
 }
 
+/** Default number of always-retained attention-sink tokens (StreamingLLM paper: 4). */
+export const DEFAULT_SINK_TOKENS = 4;
+
+/**
+ * Resolve a `budget` field (ratio in `(0, 1]` or absolute token count `>= 1`) against a
+ * concrete context window into an absolute retained-token count. Shared by every
+ * budgeted policy so ratio↔absolute resolution is identical everywhere.
+ *
+ * `budget` unset → full context (`contextWindowSize`). `<= 1` → treated as a ratio.
+ * Throws on non-finite, non-positive, or out-of-range values.
+ */
+export function resolveBudgetTokens(
+  budget: number | undefined,
+  contextWindowSize: number,
+): number {
+  if (!Number.isFinite(contextWindowSize) || contextWindowSize < 1) {
+    throw new Error(
+      `EvictionConfig: contextWindowSize must be a positive integer, got ${contextWindowSize}.`,
+    );
+  }
+  if (budget === undefined) {
+    return Math.floor(contextWindowSize);
+  }
+  if (!Number.isFinite(budget) || budget <= 0) {
+    throw new Error(
+      `EvictionConfig.budget must be a positive number (ratio in (0,1] or absolute >= 1), got ${budget}.`,
+    );
+  }
+  // Magnitude rule (matches the EvictionConfig.budget contract): <= 1 is a ratio.
+  const absolute = budget <= 1 ? budget * contextWindowSize : budget;
+  return Math.min(contextWindowSize, Math.max(1, Math.floor(absolute)));
+}
+
+/**
+ * StreamingLLM policy (VAS-53): retain the first `sinkTokens` attention-sink tokens plus
+ * a sliding window of the most-recent tokens, evict the middle. This is the cheapest
+ * policy and adds **no new kernels** — it maps directly onto TVM's existing
+ * `EnableSlidingWindowForSeq(seq_id, window_size, sink_size)` (apache/tvm#16729). It is
+ * the differentiation baseline that the attention-aware policies (SnapKV/PyramidKV/H2O)
+ * must beat at equal budget, and it validates the VAS-52 policy-hook plumbing end-to-end.
+ *
+ * Resolution semantics:
+ *  - `budget` resolves to an absolute retained-token count (see `resolveBudgetTokens`).
+ *  - `sinkTokens` defaults to `DEFAULT_SINK_TOKENS` (4).
+ *  - `windowSize`, if unset, is derived as `budget - sinkTokens` so that
+ *    `sink + window == budget`. If set explicitly it is honored (and budget is treated
+ *    as `sink + window` for the runtime hook).
+ *
+ * Position IDs: retained K already carries correct RoPE; only newly appended tokens get
+ * fresh positions (plan §3.5 Option 1 — sparse position IDs). The runtime hook owns this;
+ * the TS layer only emits the normalized config.
+ */
+export class StreamingLLMEvictionPolicy implements EvictionPolicy {
+  readonly kind = EvictionPolicyKind.StreamingLLM;
+
+  constructor(private readonly config: EvictionConfig) {
+    if (config.kind !== EvictionPolicyKind.StreamingLLM) {
+      throw new Error(
+        `StreamingLLMEvictionPolicy got config.kind="${config.kind}", expected "${EvictionPolicyKind.StreamingLLM}".`,
+      );
+    }
+  }
+
+  resolve(contextWindowSize: number): EvictionConfig {
+    const budget = resolveBudgetTokens(this.config.budget, contextWindowSize);
+
+    const sinkTokens = this.config.sinkTokens ?? DEFAULT_SINK_TOKENS;
+    if (!Number.isInteger(sinkTokens) || sinkTokens < 0) {
+      throw new Error(
+        `StreamingLLM: sinkTokens must be a non-negative integer, got ${sinkTokens}.`,
+      );
+    }
+    if (sinkTokens >= budget) {
+      throw new Error(
+        `StreamingLLM: sinkTokens (${sinkTokens}) must be smaller than the resolved budget (${budget}); no room for a sliding window.`,
+      );
+    }
+
+    // Derive the window from the budget when not given; otherwise honor the explicit one.
+    const windowSize = this.config.windowSize ?? budget - sinkTokens;
+    if (!Number.isInteger(windowSize) || windowSize < 1) {
+      throw new Error(
+        `StreamingLLM: windowSize must be a positive integer, got ${windowSize}.`,
+      );
+    }
+
+    return {
+      kind: EvictionPolicyKind.StreamingLLM,
+      budget: sinkTokens + windowSize,
+      sinkTokens,
+      windowSize,
+    };
+  }
+}
+
 /** The default eviction config: full cache, engine unchanged. */
 export const DEFAULT_EVICTION_CONFIG: EvictionConfig = {
   kind: EvictionPolicyKind.NoOp,
 };
 
 /**
+ * Construct the `EvictionPolicy` for a config. Central dispatch point — concrete
+ * attention-aware policies (SnapKV/PyramidKV/H2O) register here as they land
+ * (VAS-56/57/60). Unset config → no-op (engine runs unchanged).
+ */
+export function createEvictionPolicy(config?: EvictionConfig): EvictionPolicy {
+  if (config === undefined || config.kind === EvictionPolicyKind.NoOp) {
+    return new NoOpEvictionPolicy();
+  }
+  switch (config.kind) {
+    case EvictionPolicyKind.StreamingLLM:
+      return new StreamingLLMEvictionPolicy(config);
+    case EvictionPolicyKind.H2O:
+    case EvictionPolicyKind.SnapKV:
+    case EvictionPolicyKind.PyramidKV:
+      throw new Error(
+        `Eviction policy "${config.kind}" is not implemented yet (tracked in VAS-56/57/60).`,
+      );
+    default:
+      throw new Error(
+        `Unknown eviction policy kind: ${(config as EvictionConfig).kind}.`,
+      );
+  }
+}
+
+/**
  * Returns true when the config requires no runtime hooks (so the engine can take the
- * fast, unmodified path). Concrete attention-aware policies (VAS-53/56/57/60) will be
- * registered here as they land; until then everything but an explicit non-no-op kind is
- * treated as no-op.
+ * fast, unmodified path). Any explicit non-no-op kind (StreamingLLM is live as of
+ * VAS-53; SnapKV/PyramidKV/H2O land in VAS-56/57/60) requires hooks and returns false.
  */
 export function isNoOpEviction(config?: EvictionConfig): boolean {
   return config === undefined || config.kind === EvictionPolicyKind.NoOp;

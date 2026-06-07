@@ -33,7 +33,10 @@ Attach points, by policy phase:
 
 1. **Sequence setup** — `AddSequence` / `EnableSlidingWindowForSeq`.
    StreamingLLM (VAS-53) reuses this almost verbatim: `window = budget - sink`,
-   `sink = sinkTokens`. No new kernel.
+   `sink = sinkTokens`. No new kernel. The TS side (`StreamingLLMEvictionPolicy`) is
+   implemented and emits a normalized `{budget, sinkTokens, windowSize}` config for this
+   hook; binding it to `EnableSlidingWindowForSeq` in the runtime is the remaining piece
+   and depends on the local toolchain (VAS-87).
 
 2. **Prefill-time selection** — after the prefill attention compute, before pages are
    committed. SnapKV (VAS-56) / PyramidKV (VAS-57) pool attention over the observation
@@ -77,3 +80,19 @@ The ablation axes (VAS-65) map 1:1 onto `sinkTokens`, `observationWindow`,
 - [x] Hook points in `paged_kv_cache.cc` documented (above).
 - [ ] TVM/MLC-LLM-side hook binding — depends on the local eviction toolchain
   (VAS-87) and the attention-score spike (VAS-47). Out of scope for the TS scaffold.
+
+## StreamingLLM TS policy (VAS-53)
+
+- [x] `StreamingLLMEvictionPolicy` implemented (sink + sliding window, no new kernels).
+  Resolves `budget` (ratio or absolute) → absolute token count, defaults `sinkTokens` to
+  4, derives `windowSize = budget - sink` (or honors an explicit window), and emits a
+  normalized `{kind, budget, sinkTokens, windowSize}` config for the sequence-setup hook.
+- [x] `createEvictionPolicy()` factory + `resolveBudgetTokens()` helper added; exported
+  from `src/index.ts`. Unit tests in `tests/eviction_policy.test.ts`.
+- [ ] Runtime binding to `EnableSlidingWindowForSeq` + sparse position IDs (plan §3.5
+  Option 1) — depends on VAS-87. Until then the policy resolves config but no eviction
+  physically fires; the engine still runs full-cache.
+
+> Note: per VAS-53, StreamingLLM is the **differentiation baseline** (it maps onto a
+> primitive TVM already ships), not a novel contribution — it is the bar SnapKV/PyramidKV
+> must beat at equal budget (VAS-86) and the end-to-end validation of the VAS-52 plumbing.
