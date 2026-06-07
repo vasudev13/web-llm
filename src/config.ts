@@ -9,6 +9,7 @@ import {
   RangeError,
 } from "./error";
 import { ModelIntegrity } from "./integrity";
+import { EvictionConfig } from "./eviction_policy";
 
 /**
  * Conversation template config
@@ -94,6 +95,9 @@ export interface ChatConfig {
   context_window_size: number;
   sliding_window_size: number;
   attention_sink_size: number;
+  // Pluggable KV-cache eviction (VAS-52). Optional; defaults to no-op (full cache),
+  // so when unset the engine runs unchanged. See `eviction_policy.ts`.
+  eviction_config?: EvictionConfig;
   // RNNState settings (for hybrid/recurrent models). If unspecified, runtime picks a safe default.
   max_history_size?: number;
   // Fields below can be swapped per-generation via `GenerationConfig`
