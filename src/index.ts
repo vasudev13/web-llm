@@ -22,6 +22,22 @@ export {
 export { IntegrityError } from "./error";
 
 export {
+  EvictionPolicyKind,
+  type EvictionConfig,
+  type EvictionPolicy,
+  NoOpEvictionPolicy,
+  StreamingLLMEvictionPolicy,
+  SnapKVEvictionPolicy,
+  DEFAULT_EVICTION_CONFIG,
+  DEFAULT_SINK_TOKENS,
+  DEFAULT_OBSERVATION_WINDOW,
+  DEFAULT_POOLING_KERNEL_SIZE,
+  isNoOpEviction,
+  resolveBudgetTokens,
+  createEvictionPolicy,
+} from "./eviction_policy";
+
+export {
   InitProgressCallback,
   InitProgressReport,
   MLCEngineInterface,
