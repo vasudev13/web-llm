@@ -3,7 +3,10 @@ import {
   EvictionPolicyKind,
   NoOpEvictionPolicy,
   StreamingLLMEvictionPolicy,
+  SnapKVEvictionPolicy,
   DEFAULT_SINK_TOKENS,
+  DEFAULT_OBSERVATION_WINDOW,
+  DEFAULT_POOLING_KERNEL_SIZE,
   isNoOpEviction,
   resolveBudgetTokens,
   createEvictionPolicy,
@@ -135,9 +138,99 @@ describe("createEvictionPolicy", () => {
     ).toBeInstanceOf(StreamingLLMEvictionPolicy);
   });
 
+  test("snapkv → SnapKVEvictionPolicy", () => {
+    expect(
+      createEvictionPolicy({
+        kind: EvictionPolicyKind.SnapKV,
+        budget: 1024,
+      }),
+    ).toBeInstanceOf(SnapKVEvictionPolicy);
+  });
+
   test("not-yet-implemented policies throw with a tracking pointer", () => {
     expect(() =>
-      createEvictionPolicy({ kind: EvictionPolicyKind.SnapKV }),
+      createEvictionPolicy({ kind: EvictionPolicyKind.H2O }),
     ).toThrow(/not implemented/);
+  });
+});
+
+describe("SnapKVEvictionPolicy", () => {
+  test("fills defaults: sink, observation window, pooling kernel", () => {
+    const config: EvictionConfig = {
+      kind: EvictionPolicyKind.SnapKV,
+      budget: 1024,
+    };
+    const resolved = new SnapKVEvictionPolicy(config).resolve(4096);
+    expect(resolved).toEqual({
+      kind: EvictionPolicyKind.SnapKV,
+      budget: 1024,
+      sinkTokens: DEFAULT_SINK_TOKENS,
+      observationWindow: DEFAULT_OBSERVATION_WINDOW,
+      poolingKernelSize: DEFAULT_POOLING_KERNEL_SIZE,
+    });
+    expect(isNoOpEviction(resolved)).toBe(false);
+  });
+
+  test("ratio budget resolves against context window", () => {
+    const config: EvictionConfig = {
+      kind: EvictionPolicyKind.SnapKV,
+      budget: 0.25,
+    };
+    const resolved = new SnapKVEvictionPolicy(config).resolve(8192);
+    // 0.25 * 8192 = 2048
+    expect(resolved.budget).toBe(2048);
+  });
+
+  test("honors explicit observation window and pooling kernel", () => {
+    const config: EvictionConfig = {
+      kind: EvictionPolicyKind.SnapKV,
+      budget: 2048,
+      sinkTokens: 8,
+      observationWindow: 64,
+      poolingKernelSize: 13,
+    };
+    const resolved = new SnapKVEvictionPolicy(config).resolve(8192);
+    expect(resolved.sinkTokens).toBe(8);
+    expect(resolved.observationWindow).toBe(64);
+    expect(resolved.poolingKernelSize).toBe(13);
+  });
+
+  test("rejects sink + observation window >= budget (no room to select)", () => {
+    const config: EvictionConfig = {
+      kind: EvictionPolicyKind.SnapKV,
+      budget: 32,
+      sinkTokens: 4,
+      observationWindow: 32,
+    };
+    expect(() => new SnapKVEvictionPolicy(config).resolve(4096)).toThrow();
+  });
+
+  test("rejects an even pooling kernel size", () => {
+    expect(() =>
+      new SnapKVEvictionPolicy({
+        kind: EvictionPolicyKind.SnapKV,
+        budget: 1024,
+        poolingKernelSize: 8,
+      }).resolve(4096),
+    ).toThrow(/odd/);
+  });
+
+  test("rejects a non-positive observation window", () => {
+    expect(() =>
+      new SnapKVEvictionPolicy({
+        kind: EvictionPolicyKind.SnapKV,
+        budget: 1024,
+        observationWindow: 0,
+      }).resolve(4096),
+    ).toThrow();
+  });
+
+  test("rejects a mismatched config kind", () => {
+    expect(
+      () =>
+        new SnapKVEvictionPolicy({
+          kind: EvictionPolicyKind.StreamingLLM,
+        }),
+    ).toThrow();
   });
 });

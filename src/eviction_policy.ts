@@ -74,6 +74,14 @@ export interface EvictionConfig {
   observationWindow?: number;
 
   /**
+   * Average-pooling kernel size applied to the pooled observation-window scores before
+   * top-K (SnapKV / PyramidKV). Pooling clusters contiguous important positions so the
+   * selection keeps coherent spans rather than isolated tokens (SnapKV paper §3.2).
+   * Must be a positive odd integer so the window is symmetric about each position.
+   */
+  poolingKernelSize?: number;
+
+  /**
    * H2O eviction interval — how many decode steps between heavy-hitter recomputations.
    * Trades dispatch overhead (H3) against selection freshness. Ablation axis.
    */
@@ -121,6 +129,19 @@ export class NoOpEvictionPolicy implements EvictionPolicy {
 
 /** Default number of always-retained attention-sink tokens (StreamingLLM paper: 4). */
 export const DEFAULT_SINK_TOKENS = 4;
+
+/**
+ * Default observation window for SnapKV/PyramidKV prefill-time selection (SnapKV paper
+ * default: 32). The last `observationWindow` prompt tokens vote on which earlier tokens
+ * to keep; these recent tokens are themselves always retained.
+ */
+export const DEFAULT_OBSERVATION_WINDOW = 32;
+
+/**
+ * Default average-pooling kernel size for SnapKV/PyramidKV selection (SnapKV paper: 7).
+ * Must be a positive odd integer (symmetric window about each scored position).
+ */
+export const DEFAULT_POOLING_KERNEL_SIZE = 7;
 
 /**
  * Resolve a `budget` field (ratio in `(0, 1]` or absolute token count `>= 1`) against a
@@ -214,6 +235,92 @@ export class StreamingLLMEvictionPolicy implements EvictionPolicy {
   }
 }
 
+/**
+ * SnapKV policy (VAS-56) — **★ the primary attention-aware policy for the EMNLP demo.**
+ *
+ * One-shot selection at the *end of prefill*: pool attention scores from the last
+ * `observationWindow` prompt tokens (the "observation window") over the earlier prompt
+ * tokens, average-pool the pooled scores with a `poolingKernelSize` kernel so coherent
+ * spans win over isolated spikes, then keep the top-K earlier positions per head within
+ * the budget. The `sinkTokens` prefix and the observation window itself are always
+ * retained. After prefill the retained set is **fixed** — there is **zero per-decode-step
+ * eviction**, hence no per-token dispatch overhead. At batch=1 in the browser that
+ * dispatch cost dominates (H3), which is exactly why SnapKV is predicted to beat the
+ * rolling H2O policy in-browser (H1/H3).
+ *
+ * Like every policy here this is the *declarative* TS layer only: it validates and
+ * normalizes the config the runtime hook consumes. The physical selection runs in a
+ * **`pooled_select` WGSL kernel** at the prefill-end hook (see
+ * `docs/eviction/snapkv_pooled_select.wgsl` and EVICTION_BOUNDARY.md §SnapKV). The
+ * kernel reads pooled observation-window scores **without materializing the full
+ * attention matrix** — the score read path is de-risked in VAS-47.
+ *
+ * Budget bookkeeping: `budget` resolves to the total retained-token count. The sink
+ * prefix and the observation window are always kept, so the kernel selects
+ * `budget - sinkTokens - observationWindow` *earlier* positions by pooled score. The
+ * resolved config therefore requires `sinkTokens + observationWindow < budget` so there
+ * is room for at least one selected token.
+ */
+export class SnapKVEvictionPolicy implements EvictionPolicy {
+  readonly kind = EvictionPolicyKind.SnapKV;
+
+  constructor(protected readonly config: EvictionConfig) {
+    if (config.kind !== this.kind) {
+      throw new Error(
+        `${this.constructor.name} got config.kind="${config.kind}", expected "${this.kind}".`,
+      );
+    }
+  }
+
+  resolve(contextWindowSize: number): EvictionConfig {
+    const budget = resolveBudgetTokens(this.config.budget, contextWindowSize);
+
+    const sinkTokens = this.config.sinkTokens ?? DEFAULT_SINK_TOKENS;
+    if (!Number.isInteger(sinkTokens) || sinkTokens < 0) {
+      throw new Error(
+        `${this.kind}: sinkTokens must be a non-negative integer, got ${sinkTokens}.`,
+      );
+    }
+
+    const observationWindow =
+      this.config.observationWindow ?? DEFAULT_OBSERVATION_WINDOW;
+    if (!Number.isInteger(observationWindow) || observationWindow < 1) {
+      throw new Error(
+        `${this.kind}: observationWindow must be a positive integer, got ${observationWindow}.`,
+      );
+    }
+
+    const poolingKernelSize =
+      this.config.poolingKernelSize ?? DEFAULT_POOLING_KERNEL_SIZE;
+    if (
+      !Number.isInteger(poolingKernelSize) ||
+      poolingKernelSize < 1 ||
+      poolingKernelSize % 2 === 0
+    ) {
+      throw new Error(
+        `${this.kind}: poolingKernelSize must be a positive odd integer, got ${poolingKernelSize}.`,
+      );
+    }
+
+    // The sink prefix and the observation window are always retained, so there must be
+    // room left in the budget to select at least one earlier token by pooled score.
+    if (sinkTokens + observationWindow >= budget) {
+      throw new Error(
+        `${this.kind}: sinkTokens (${sinkTokens}) + observationWindow (${observationWindow}) ` +
+          `must be smaller than the resolved budget (${budget}); no room to select earlier tokens.`,
+      );
+    }
+
+    return {
+      kind: this.kind,
+      budget,
+      sinkTokens,
+      observationWindow,
+      poolingKernelSize,
+    };
+  }
+}
+
 /** The default eviction config: full cache, engine unchanged. */
 export const DEFAULT_EVICTION_CONFIG: EvictionConfig = {
   kind: EvictionPolicyKind.NoOp,
@@ -221,8 +328,8 @@ export const DEFAULT_EVICTION_CONFIG: EvictionConfig = {
 
 /**
  * Construct the `EvictionPolicy` for a config. Central dispatch point — concrete
- * attention-aware policies (SnapKV/PyramidKV/H2O) register here as they land
- * (VAS-56/57/60). Unset config → no-op (engine runs unchanged).
+ * attention-aware policies register here as they land (SnapKV is live as of VAS-56;
+ * PyramidKV/H2O in VAS-57/60). Unset config → no-op (engine runs unchanged).
  */
 export function createEvictionPolicy(config?: EvictionConfig): EvictionPolicy {
   if (config === undefined || config.kind === EvictionPolicyKind.NoOp) {
@@ -231,11 +338,12 @@ export function createEvictionPolicy(config?: EvictionConfig): EvictionPolicy {
   switch (config.kind) {
     case EvictionPolicyKind.StreamingLLM:
       return new StreamingLLMEvictionPolicy(config);
-    case EvictionPolicyKind.H2O:
     case EvictionPolicyKind.SnapKV:
+      return new SnapKVEvictionPolicy(config);
+    case EvictionPolicyKind.H2O:
     case EvictionPolicyKind.PyramidKV:
       throw new Error(
-        `Eviction policy "${config.kind}" is not implemented yet (tracked in VAS-56/57/60).`,
+        `Eviction policy "${config.kind}" is not implemented yet (tracked in VAS-57/60).`,
       );
     default:
       throw new Error(
@@ -246,8 +354,8 @@ export function createEvictionPolicy(config?: EvictionConfig): EvictionPolicy {
 
 /**
  * Returns true when the config requires no runtime hooks (so the engine can take the
- * fast, unmodified path). Any explicit non-no-op kind (StreamingLLM is live as of
- * VAS-53; SnapKV/PyramidKV/H2O land in VAS-56/57/60) requires hooks and returns false.
+ * fast, unmodified path). Any explicit non-no-op kind (StreamingLLM live as of VAS-53,
+ * SnapKV as of VAS-56; PyramidKV/H2O land in VAS-57/60) requires hooks → returns false.
  */
 export function isNoOpEviction(config?: EvictionConfig): boolean {
   return config === undefined || config.kind === EvictionPolicyKind.NoOp;

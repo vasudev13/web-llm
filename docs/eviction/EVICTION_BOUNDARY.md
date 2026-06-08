@@ -96,3 +96,38 @@ The ablation axes (VAS-65) map 1:1 onto `sinkTokens`, `observationWindow`,
 > Note: per VAS-53, StreamingLLM is the **differentiation baseline** (it maps onto a
 > primitive TVM already ships), not a novel contribution — it is the bar SnapKV/PyramidKV
 > must beat at equal budget (VAS-86) and the end-to-end validation of the VAS-52 plumbing.
+
+## SnapKV TS policy + pooled-select kernel (VAS-56)
+
+SnapKV is the **★ primary attention-aware policy** for the EMNLP demo — the headline
+result the StreamingLLM baseline must be beaten by. It attaches at **hook point 2
+(prefill-time selection)** and adds **zero decode-time dispatches**: one-shot selection
+at the end of prefill, fixed budget thereafter. At batch=1 in the browser the per-token
+dispatch cost dominates (H3), so a policy with no per-step eviction is predicted to beat
+rolling H2O in-browser (H1/H3) — this is the reason SnapKV is the recommended route.
+
+- [x] `SnapKVEvictionPolicy` implemented (TS declarative layer). Resolves `budget`
+  (ratio or absolute) → absolute token count; defaults `sinkTokens` → 4,
+  `observationWindow` → 32, `poolingKernelSize` → 7 (SnapKV paper defaults); validates
+  `poolingKernelSize` is a positive **odd** integer and that
+  `sinkTokens + observationWindow < budget` (room to select earlier tokens). Emits a
+  normalized `{kind, budget, sinkTokens, observationWindow, poolingKernelSize}` config.
+- [x] New `EvictionConfig.poolingKernelSize` field (ablation axis, VAS-65) + defaults
+  `DEFAULT_OBSERVATION_WINDOW`, `DEFAULT_POOLING_KERNEL_SIZE`. `createEvictionPolicy()`
+  dispatches `snapkv → SnapKVEvictionPolicy`. Exported from `src/index.ts`; unit tests in
+  `tests/eviction_policy.test.ts`.
+- [x] `pooled_select` WGSL kernel **design reference** written —
+  `docs/eviction/snapkv_pooled_select.wgsl`. Three stages: (1) score earlier keys with
+  the observation-window queries only — the last `obs_window` rows of the attention
+  matrix, `obs_window << seq_len`, so the full matrix is never materialized; (2)
+  symmetric avg-pool of width `poolingKernelSize`; (3) top-K → retained page list for the
+  PagedKVCache compaction hook. Sink prefix forced to the top via an `+inf` sentinel;
+  retained K keep their prefill RoPE (sparse position IDs, plan §3.5 Option 1).
+- [ ] Runtime binding of the kernel into a compiled model lib + the prefill-end
+  compaction hook in `paged_kv_cache.cc`. Gated on the attention-score read path (VAS-47)
+  and the local eviction toolchain (VAS-87). Until then the policy resolves config but no
+  eviction physically fires; the engine still runs full-cache.
+
+> PyramidKV (VAS-57) is the per-layer-budget variant of SnapKV — it reuses this kernel
+> with a per-layer `select_count` (steeper budget in lower layers via `pyramidAlpha`), so
+> `SnapKVEvictionPolicy` is written with a `protected` config to be subclassable.
