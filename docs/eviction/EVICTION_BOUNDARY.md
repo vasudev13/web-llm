@@ -15,11 +15,11 @@ policy attaches to. It is the design contract; later issues implement the pieces
 
 ## Layer responsibilities
 
-| Layer | Repo | Responsibility for eviction |
-| --- | --- | --- |
-| **web-llm (TS)** | `mlc-ai/web-llm` | Declarative only. Selects a policy + budget (`EvictionConfig`), exposes it in `ChatConfig`/the demo UI, and forwards it to the runtime. Never manipulates pages directly. `src/eviction_policy.ts`. |
-| **MLC-LLM (Python)** | `mlc-ai/mlc-llm` | Model definitions wire the policy through at compile time and bind the runtime control hooks. Decides which attention call returns scores (for H2O/SnapKV). |
-| **TVM (C++/WGSL)** | `apache/tvm` | The actual KV cache. `PagedKVCache` page-table manipulation, sink/window retention, and score-based selection kernels live here. This is where eviction physically happens. |
+| Layer                | Repo             | Responsibility for eviction                                                                                                                                                                         |
+| -------------------- | ---------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **web-llm (TS)**     | `mlc-ai/web-llm` | Declarative only. Selects a policy + budget (`EvictionConfig`), exposes it in `ChatConfig`/the demo UI, and forwards it to the runtime. Never manipulates pages directly. `src/eviction_policy.ts`. |
+| **MLC-LLM (Python)** | `mlc-ai/mlc-llm` | Model definitions wire the policy through at compile time and bind the runtime control hooks. Decides which attention call returns scores (for H2O/SnapKV).                                         |
+| **TVM (C++/WGSL)**   | `apache/tvm`     | The actual KV cache. `PagedKVCache` page-table manipulation, sink/window retention, and score-based selection kernels live here. This is where eviction physically happens.                         |
 
 ## Hook points in `paged_kv_cache.cc`
 
@@ -59,15 +59,15 @@ unchanged. This is the VAS-52 safety guarantee.
 `EvictionConfig` (see `src/eviction_policy.ts`) is the single declarative shape passed
 from web-llm down to the runtime hooks:
 
-| Field | Consumed by | Hook point |
-| --- | --- | --- |
-| `kind` | dispatch | selects which hooks bind (or none, for `NoOp`) |
-| `budget` (ratio or absolute) | all | retained-page count |
-| `sinkTokens` | StreamingLLM/H2O/SnapKV/PyramidKV | sequence setup (sink) |
-| `windowSize` | StreamingLLM/H2O/SnapKV | sequence setup / recent guard |
-| `observationWindow` | SnapKV/PyramidKV | prefill-time selection |
-| `evictionInterval` | H2O | decode-time eviction cadence |
-| `pyramidAlpha` | PyramidKV | per-layer budget at selection |
+| Field                        | Consumed by                       | Hook point                                     |
+| ---------------------------- | --------------------------------- | ---------------------------------------------- |
+| `kind`                       | dispatch                          | selects which hooks bind (or none, for `NoOp`) |
+| `budget` (ratio or absolute) | all                               | retained-page count                            |
+| `sinkTokens`                 | StreamingLLM/H2O/SnapKV/PyramidKV | sequence setup (sink)                          |
+| `windowSize`                 | StreamingLLM/H2O/SnapKV           | sequence setup / recent guard                  |
+| `observationWindow`          | SnapKV/PyramidKV                  | prefill-time selection                         |
+| `evictionInterval`           | H2O                               | decode-time eviction cadence                   |
+| `pyramidAlpha`               | PyramidKV                         | per-layer budget at selection                  |
 
 The ablation axes (VAS-65) map 1:1 onto `sinkTokens`, `observationWindow`,
 `pyramidAlpha`, and `evictionInterval`, so sweeps need no code changes.
@@ -76,22 +76,22 @@ The ablation axes (VAS-65) map 1:1 onto `sinkTokens`, `observationWindow`,
 
 - [x] `EvictionPolicy` + `EvictionConfig` defined, runtime/JS boundary drawn (this doc).
 - [x] No-op policy; optional `ChatConfig.eviction_config` defaulting to no-op → engine
-  runs unchanged. Public API exports added in `src/index.ts`.
+      runs unchanged. Public API exports added in `src/index.ts`.
 - [x] Hook points in `paged_kv_cache.cc` documented (above).
 - [ ] TVM/MLC-LLM-side hook binding — depends on the local eviction toolchain
-  (VAS-87) and the attention-score spike (VAS-47). Out of scope for the TS scaffold.
+      (VAS-87) and the attention-score spike (VAS-47). Out of scope for the TS scaffold.
 
 ## StreamingLLM TS policy (VAS-53)
 
 - [x] `StreamingLLMEvictionPolicy` implemented (sink + sliding window, no new kernels).
-  Resolves `budget` (ratio or absolute) → absolute token count, defaults `sinkTokens` to
-  4, derives `windowSize = budget - sink` (or honors an explicit window), and emits a
-  normalized `{kind, budget, sinkTokens, windowSize}` config for the sequence-setup hook.
+      Resolves `budget` (ratio or absolute) → absolute token count, defaults `sinkTokens` to
+      4, derives `windowSize = budget - sink` (or honors an explicit window), and emits a
+      normalized `{kind, budget, sinkTokens, windowSize}` config for the sequence-setup hook.
 - [x] `createEvictionPolicy()` factory + `resolveBudgetTokens()` helper added; exported
-  from `src/index.ts`. Unit tests in `tests/eviction_policy.test.ts`.
+      from `src/index.ts`. Unit tests in `tests/eviction_policy.test.ts`.
 - [ ] Runtime binding to `EnableSlidingWindowForSeq` + sparse position IDs (plan §3.5
-  Option 1) — depends on VAS-87. Until then the policy resolves config but no eviction
-  physically fires; the engine still runs full-cache.
+      Option 1) — depends on VAS-87. Until then the policy resolves config but no eviction
+      physically fires; the engine still runs full-cache.
 
 > Note: per VAS-53, StreamingLLM is the **differentiation baseline** (it maps onto a
 > primitive TVM already ships), not a novel contribution — it is the bar SnapKV/PyramidKV
@@ -107,27 +107,66 @@ dispatch cost dominates (H3), so a policy with no per-step eviction is predicted
 rolling H2O in-browser (H1/H3) — this is the reason SnapKV is the recommended route.
 
 - [x] `SnapKVEvictionPolicy` implemented (TS declarative layer). Resolves `budget`
-  (ratio or absolute) → absolute token count; defaults `sinkTokens` → 4,
-  `observationWindow` → 32, `poolingKernelSize` → 7 (SnapKV paper defaults); validates
-  `poolingKernelSize` is a positive **odd** integer and that
-  `sinkTokens + observationWindow < budget` (room to select earlier tokens). Emits a
-  normalized `{kind, budget, sinkTokens, observationWindow, poolingKernelSize}` config.
+      (ratio or absolute) → absolute token count; defaults `sinkTokens` → 4,
+      `observationWindow` → 32, `poolingKernelSize` → 7 (SnapKV paper defaults); validates
+      `poolingKernelSize` is a positive **odd** integer and that
+      `sinkTokens + observationWindow < budget` (room to select earlier tokens). Emits a
+      normalized `{kind, budget, sinkTokens, observationWindow, poolingKernelSize}` config.
 - [x] New `EvictionConfig.poolingKernelSize` field (ablation axis, VAS-65) + defaults
-  `DEFAULT_OBSERVATION_WINDOW`, `DEFAULT_POOLING_KERNEL_SIZE`. `createEvictionPolicy()`
-  dispatches `snapkv → SnapKVEvictionPolicy`. Exported from `src/index.ts`; unit tests in
-  `tests/eviction_policy.test.ts`.
+      `DEFAULT_OBSERVATION_WINDOW`, `DEFAULT_POOLING_KERNEL_SIZE`. `createEvictionPolicy()`
+      dispatches `snapkv → SnapKVEvictionPolicy`. Exported from `src/index.ts`; unit tests in
+      `tests/eviction_policy.test.ts`.
 - [x] `pooled_select` WGSL kernel **design reference** written —
-  `docs/eviction/snapkv_pooled_select.wgsl`. Three stages: (1) score earlier keys with
-  the observation-window queries only — the last `obs_window` rows of the attention
-  matrix, `obs_window << seq_len`, so the full matrix is never materialized; (2)
-  symmetric avg-pool of width `poolingKernelSize`; (3) top-K → retained page list for the
-  PagedKVCache compaction hook. Sink prefix forced to the top via an `+inf` sentinel;
-  retained K keep their prefill RoPE (sparse position IDs, plan §3.5 Option 1).
+      `docs/eviction/snapkv_pooled_select.wgsl`. Three stages: (1) score earlier keys with
+      the observation-window queries only — the last `obs_window` rows of the attention
+      matrix, `obs_window << seq_len`, so the full matrix is never materialized; (2)
+      symmetric avg-pool of width `poolingKernelSize`; (3) top-K → retained page list for the
+      PagedKVCache compaction hook. Sink prefix forced to the top via an `+inf` sentinel;
+      retained K keep their prefill RoPE (sparse position IDs, plan §3.5 Option 1).
 - [ ] Runtime binding of the kernel into a compiled model lib + the prefill-end
-  compaction hook in `paged_kv_cache.cc`. Gated on the attention-score read path (VAS-47)
-  and the local eviction toolchain (VAS-87). Until then the policy resolves config but no
-  eviction physically fires; the engine still runs full-cache.
+      compaction hook in `paged_kv_cache.cc`. Gated on the attention-score read path (VAS-47)
+      and the local eviction toolchain (VAS-87). Until then the policy resolves config but no
+      eviction physically fires; the engine still runs full-cache.
 
 > PyramidKV (VAS-57) is the per-layer-budget variant of SnapKV — it reuses this kernel
 > with a per-layer `select_count` (steeper budget in lower layers via `pyramidAlpha`), so
 > `SnapKVEvictionPolicy` is written with a `protected` config to be subclassable.
+
+## PyramidKV TS policy (VAS-57)
+
+PyramidKV is a **per-layer budget** variant of SnapKV. SnapKV gives every transformer
+layer the same KV budget; PyramidKV observes that attention is more dispersed in lower
+layers and more concentrated in upper ones, so it spends more budget low in the stack and
+less up top (the "pyramid"). It reuses SnapKV's pooled observation-window selection
+verbatim at **hook point 2 (prefill-time selection)** — only the per-layer top-K changes —
+so it inherits SnapKV's zero-decode-time-dispatch property. PyramidKV reports ~95% of
+full-cache quality at ~12% retention.
+
+- [x] `PyramidKVEvictionPolicy` implemented as a **subclass of `SnapKVEvictionPolicy`**
+      (`src/eviction_policy.ts`). It inherits all SnapKV sink/observation-window/pooling
+      validation and budget resolution, then layers the `pyramidAlpha` decay factor (default
+      `DEFAULT_PYRAMID_ALPHA` = 0.7; validated to `(0, 1]`). Emits a normalized
+      `{kind, budget, sinkTokens, observationWindow, poolingKernelSize, pyramidAlpha}` config.
+- [x] `computePyramidLayerBudgets(totalSelectable, numHiddenLayers, alpha)` — the pure,
+      unit-tested core of the per-layer schedule. Geometric weights `w_l = alpha^l` →
+      `budget_l = round(totalSelectable · w_l / Σ w_k)`; **largest-remainder rounding** so the
+      per-layer counts sum to _exactly_ `totalSelectable` (ties favor lower layers, preserving
+      the non-increasing shape). `alpha = 1` degenerates to a uniform split (== flat SnapKV).
+- [x] `PyramidKVEvictionPolicy.resolveLayerBudgets(contextWindowSize, numHiddenLayers)`
+      returns the per-layer **total** retained budgets: each layer keeps the always-retained
+      sink prefix + observation window, plus its pyramid share of the selectable budget
+      (`budget − sinkTokens − observationWindow`), capped at `contextWindowSize`.
+- [x] `createEvictionPolicy()` dispatches `pyramid-kv → PyramidKVEvictionPolicy`; exported
+      from `src/index.ts`; unit tests in `tests/eviction_policy.test.ts` (sum-invariance,
+      monotonicity for `alpha < 1`, uniform degeneration at `alpha = 1`, validation).
+- [ ] Runtime binding: invoke the SnapKV `pooled_select` kernel **once per layer** with
+      `budget_l` from `resolveLayerBudgets`, wired into the prefill-end compaction hook in
+      `paged_kv_cache.cc`. Shares the same blockers as SnapKV — the attention-score read path
+      (VAS-47) and the local eviction toolchain (VAS-87). Until then the policy resolves
+      config + per-layer budgets but no eviction physically fires.
+
+> Why geometric (vs. the original PyramidKV's arithmetic schedule): a single `alpha` knob
+> is one clean ablation axis (VAS-65: 0.5 / 0.7 / 0.9), exactly continuous from `alpha = 1`
+> (= SnapKV), which keeps the policy comparison controlled. The runtime consumes only the
+> resolved per-layer integer budgets, so the schedule shape can be swapped later without
+> touching the kernel.

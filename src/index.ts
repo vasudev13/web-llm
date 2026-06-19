@@ -28,12 +28,15 @@ export {
   NoOpEvictionPolicy,
   StreamingLLMEvictionPolicy,
   SnapKVEvictionPolicy,
+  PyramidKVEvictionPolicy,
   DEFAULT_EVICTION_CONFIG,
   DEFAULT_SINK_TOKENS,
   DEFAULT_OBSERVATION_WINDOW,
   DEFAULT_POOLING_KERNEL_SIZE,
+  DEFAULT_PYRAMID_ALPHA,
   isNoOpEviction,
   resolveBudgetTokens,
+  computePyramidLayerBudgets,
   createEvictionPolicy,
 } from "./eviction_policy";
 
