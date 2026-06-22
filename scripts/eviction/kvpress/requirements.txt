@@ -1,0 +1,18 @@
+# VAS-50 — kvpress baseline (Track A quality oracle) on Apple Silicon / MPS.
+# Conservative floors, not exact pins: kvpress moves fast and pinning its
+# transitive torch/transformers too tightly tends to break the MPS path.
+# Tested intent: torch 2.3+ for a stable MPS attention backend, transformers
+# 4.44+ for the cache APIs kvpress relies on (DynamicCache / QuantizedCache).
+#
+# Install into an isolated venv via 01-setup-kvpress-env.sh — do NOT pip install
+# this into the system / pyenv-global interpreter.
+
+torch>=2.3,<2.6
+transformers>=4.44,<4.49
+accelerate>=0.33
+datasets>=2.20
+kvpress>=0.2.0
+# kvpress pulls these, listed explicitly so the audit can see them:
+sentencepiece>=0.2.0
+protobuf>=4.25
+numpy>=1.26,<2.2
