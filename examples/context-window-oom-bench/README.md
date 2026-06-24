@@ -54,6 +54,29 @@ npm start
 `npm start` already clears `.parcel-cache` on each launch, so editing root
 `src/` and restarting is enough to pick up changes.
 
+### Measured memory — cross-origin-isolated server (VAS-85)
+
+`npm start` does **not** make the page cross-origin isolated, so
+`performance.measureUserAgentSpecificMemory()` is unavailable and the
+`measMem(MB)` column comes back blank — only the metadata-based `estPeakVRAMMB`
+estimate is recorded. To capture a real memory number alongside the estimate,
+serve a build with COOP/COEP headers:
+
+```bash
+# in examples/context-window-oom-bench
+npm run start:isolated     # build + serve isolated on http://localhost:8888
+# already built lib/?  ->  npm run serve:isolated
+# knobs:  PORT=9000 npm run serve:isolated   |   COEP=require-corp npm run serve:isolated
+```
+
+The console banner should print `crossOriginIsolated=true` and each run logs a
+`measured/estimated = …x` cross-check. COEP defaults to **`credentialless`** so
+the cross-origin model-weight download from the MLC/HuggingFace CDN still works
+(under `require-corp` the CDN fetch is blocked for lack of a CORP header). See
+[`docs/eviction/VAS-85-measured-vram.md`](../../docs/eviction/VAS-85-measured-vram.md)
+for the full rationale and the important caveat that this API reports
+renderer-process memory, **not** pure GPU VRAM.
+
 Open the page in Chrome and **open the console**. You'll see:
 
 - Model download / load progress.

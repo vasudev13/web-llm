@@ -6,7 +6,9 @@
     "prestart": "node scripts/ensure-vendor-source-stubs.js",
     "prebuild": "node scripts/ensure-vendor-source-stubs.js",
     "start": "rm -rf .parcel-cache && parcel src/context_window_oom_bench.html --port 8888 --no-source-maps",
-    "build": "rm -rf .parcel-cache && parcel build src/context_window_oom_bench.html --dist-dir lib --no-source-maps"
+    "build": "rm -rf .parcel-cache && parcel build src/context_window_oom_bench.html --dist-dir lib --no-source-maps --public-url ./",
+    "serve:isolated": "node scripts/serve-isolated.mjs lib",
+    "start:isolated": "npm run build && node scripts/serve-isolated.mjs lib"
   },
   "devDependencies": {
     "buffer": "^5.7.1",

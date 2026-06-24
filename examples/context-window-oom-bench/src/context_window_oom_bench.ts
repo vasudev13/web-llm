@@ -145,6 +145,10 @@ interface RunResult {
   // Real browser memory after load+generate, if the API is available (Chrome,
   // cross-origin-isolated only). Validates the estimated peak VRAM.
   measuredMemMB?: number;
+  // Whether the page was cross-origin isolated for this run -- records the
+  // provenance of measuredMemMB so a blank value can be distinguished from a
+  // genuine zero (VAS-85).
+  crossOriginIsolated?: boolean;
   error?: string;
 }
 
@@ -168,10 +172,16 @@ async function measureMemoryMB(): Promise<number | undefined> {
   if (typeof perf.measureUserAgentSpecificMemory !== "function") {
     if (!warnedNoMemAPI) {
       warnedNoMemAPI = true;
+      const isolated =
+        typeof crossOriginIsolated !== "undefined" && crossOriginIsolated;
       console.warn(
         "[oom-bench] performance.measureUserAgentSpecificMemory() unavailable " +
-          "(needs Chrome + cross-origin isolation). Skipping real memory probe; " +
-          "estimated peak VRAM is still reported.",
+          `(needs Chrome + cross-origin isolation; crossOriginIsolated=${isolated}). ` +
+          (isolated
+            ? "Page IS isolated but the API is still missing -- check the Chrome version."
+            : "Page is NOT cross-origin isolated -- serve via `npm run start:isolated` " +
+              "(sets COOP/COEP) instead of `npm start` (VAS-85). ") +
+          "Skipping real memory probe; estimated peak VRAM is still reported.",
       );
     }
     return undefined;
@@ -487,8 +497,24 @@ async function runOne(
   // 4. Real browser memory probe (validates the estimated peak VRAM). Only
   // available in Chrome when the page is cross-origin isolated; otherwise
   // silently skipped.
+  result.crossOriginIsolated =
+    typeof crossOriginIsolated !== "undefined" && crossOriginIsolated;
   const measuredMemMB = await measureMemoryMB();
-  if (measuredMemMB !== undefined) result.measuredMemMB = measuredMemMB;
+  if (measuredMemMB !== undefined) {
+    result.measuredMemMB = measuredMemMB;
+    // Validate the estimate against the real reading. measureUserAgentSpecific-
+    // Memory() reports renderer-process memory (JS heap + some GPU/staging
+    // accounting), NOT a pure GPU-VRAM figure, so treat the ratio as a
+    // cross-check / lower bound, not an exact match (see VAS-85 doc).
+    if (result.estPeakVRAMMB !== undefined && result.estPeakVRAMMB > 0) {
+      const ratio = measuredMemMB / result.estPeakVRAMMB;
+      console.log(
+        `[oom-bench] measured/estimated VRAM = ${measuredMemMB.toFixed(0)}MB / ` +
+          `${result.estPeakVRAMMB.toFixed(0)}MB = ${ratio.toFixed(2)}x ` +
+          "(renderer memory vs metadata estimate; cross-check only).",
+      );
+    }
+  }
 
   return result;
 }
@@ -523,6 +549,7 @@ function toCSV(rows: RunResult[]): string {
     "bufferLimitHeadroomPct",
     "exceedsBufferLimit",
     "measuredMemMB",
+    "crossOriginIsolated",
     "error",
   ];
   const lines = rows.map((r) =>
@@ -549,6 +576,7 @@ function toCSV(rows: RunResult[]): string {
       fmt(r.bufferLimitHeadroomPct, 1),
       r.exceedsBufferLimit ?? "",
       fmt(r.measuredMemMB),
+      r.crossOriginIsolated ?? "",
       (r.error ?? "").replace(/[\r\n,]+/g, " "),
     ].join(","),
   );
@@ -651,6 +679,24 @@ function summarizeCliff(rows: RunResult[]) {
 // Main
 // ---------------------------------------------------------------------------
 async function main() {
+  // Cross-origin-isolation banner (VAS-85). Measured memory only resolves when
+  // the page is isolated; make the provenance of the measMem column obvious up
+  // front instead of only warning lazily on the first probe.
+  const isolated =
+    typeof crossOriginIsolated !== "undefined" && crossOriginIsolated;
+  if (isolated) {
+    console.log(
+      "[oom-bench] crossOriginIsolated=true -- measureUserAgentSpecificMemory() " +
+        "should return data; measMem(MB) validates the estimated peak VRAM.",
+    );
+  } else {
+    console.warn(
+      "[oom-bench] crossOriginIsolated=false -- measured memory will be BLANK. " +
+        "Serve via `npm run start:isolated` (COOP/COEP) to enable it (VAS-85). " +
+        "Estimated peak VRAM is still reported as usual.",
+    );
+  }
+
   // Restore any results from a previous (possibly crashed) run so they are
   // never lost, and keep them downloadable via the buttons at all times.
   const results: RunResult[] = loadSavedResults();
